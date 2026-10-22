@@ -1,4 +1,18 @@
 const messages = {
+  "constraintReview": {
+      "title": "Constraint review",
+      "explanation": "Literal checks only; they do not validate semantics or generated image fidelity.",
+      "literalTitle": "Literal constraints",
+      "found": "Found",
+      "notFound": "Missing",
+      "variable": "Variable",
+      "ratio": "Ratio",
+      "measurement": "Value",
+      "quoted": "Quoted text",
+      "manualTitle": "Manual review",
+      "manualHelp": "Verify the meaning of preservation and prohibition requirements.",
+      "manual": "Review"
+  },
   "promptOptimizer": {
     "title": "Prompt Optimizer",
     "inputPlaceholder": "Enter your prompt to optimize...",
