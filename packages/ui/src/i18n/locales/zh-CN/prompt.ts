@@ -1,4 +1,18 @@
 const messages = {
+  "constraintReview": {
+      "title": "约束核对",
+      "explanation": "仅检查字面保留情况，不代表语义正确或图片生成质量已验证。",
+      "literalTitle": "字面约束",
+      "found": "已找到",
+      "notFound": "未找到",
+      "variable": "变量",
+      "ratio": "比例",
+      "measurement": "数值",
+      "quoted": "引号文本",
+      "manualTitle": "需人工复核的要求",
+      "manualHelp": "否定、禁止和保留条件必须由你检查实际含义。",
+      "manual": "复核"
+  },
   "promptOptimizer": {
     "title": "提示词优化器",
     "inputPlaceholder": "请输入需要优化的prompt...",
