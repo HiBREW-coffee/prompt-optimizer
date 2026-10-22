@@ -1,4 +1,18 @@
 const messages = {
+  "constraintReview": {
+      "title": "約束核對",
+      "explanation": "僅檢查字面保留情況，不代表語義正確或圖片生成品質已驗證。",
+      "literalTitle": "字面約束",
+      "found": "已找到",
+      "notFound": "未找到",
+      "variable": "變數",
+      "ratio": "比例",
+      "measurement": "數值",
+      "quoted": "引號文字",
+      "manualTitle": "需人工複核的要求",
+      "manualHelp": "否定、禁止和保留條件必須由你檢查實際含義。",
+      "manual": "複核"
+  },
   "promptOptimizer": {
     "title": "提示詞優化器",
     "inputPlaceholder": "請輸入需要優化的prompt...",
