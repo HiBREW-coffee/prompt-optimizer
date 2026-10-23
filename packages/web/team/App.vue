@@ -1084,6 +1084,18 @@ onBeforeUnmount(() => {
             修改密码</button
           ><button class="quiet" @click="logout">退出</button>
         </div>
+        <details class="compact-account">
+          <summary aria-label="账号菜单">
+            <img :src="AVATAR_URL" alt="@DONGWU头像" />
+          </summary>
+          <section>
+            <strong>@DONGWU</strong><small>{{ member.email }}</small>
+            <button :disabled="busy" @click="setPassword = true">
+              修改密码
+            </button>
+            <button :disabled="busy" @click="logout">退出</button>
+          </section>
+        </details>
       </header>
       <div class="main-content">
         <div v-if="error" class="banner error" role="alert">
