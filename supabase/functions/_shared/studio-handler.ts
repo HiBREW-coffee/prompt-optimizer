@@ -243,6 +243,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
         workspace,
         version,
         suggestion,
+        Boolean(body.inspectionId),
       );
       if (workspace.mode === "reference") {
         let totalBytes = 0;
@@ -296,7 +297,12 @@ export function createStudioHandler(deps: HandlerDependencies) {
           ))
       )
         throw new StudioError("INCOMPLETE_PROFESSIONAL_REPORT", 502);
-      if (bundle && version && (action === "reference.rewrite" || suggestion)) {
+      if (
+        bundle &&
+        version &&
+        !body.inspectionId &&
+        (action === "reference.rewrite" || suggestion)
+      ) {
         if (
           Object.keys(version.bundle.structured).some(
             (key) => !Object.hasOwn(bundle.structured, key),
@@ -367,3 +373,4 @@ async function readBody(request: Request, max: number): Promise<string> {
     await reader.cancel().catch(() => {});
   }
 }
+

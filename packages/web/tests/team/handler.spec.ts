@@ -399,6 +399,55 @@ describe("authenticated team AI chain", () => {
       JSON.parse(h.generate.mock.calls[0][0].text).requestedSuggestion,
     ).toBe("具体修改");
   });
+  it("rebuilds from original input after inspection while retaining the version parent for saving", async () => {
+    const h = harness({
+      version: vi.fn().mockResolvedValue({
+        ...version,
+        bundle: {
+          ...bundle,
+          zh: "过短摘要和未经确认的品牌",
+          structured: { obsoleteModelGuess: "未经图像证实的功能" },
+        },
+      }),
+    });
+    const response = await h.request({
+      action: "reference.rewrite",
+      workspaceId: wid,
+      versionId: vid,
+      requestId: rid,
+      inspectionId: "55555555-5555-4555-8555-555555555555",
+      suggestionId: "1",
+    });
+    expect(response.status).toBe(200);
+    const input = h.generate.mock.calls[0][0];
+    expect(JSON.parse(input.text)).toMatchObject({
+      original: workspace.source_text,
+      keep: workspace.keep_text,
+      requestedSuggestion: "具体修改",
+      current: null,
+    });
+    expect(input.text).not.toContain("未经确认的品牌");
+    expect(input.images).toHaveLength(1);
+    expect(h.store.save).toHaveBeenCalledWith(
+      uid, workspace, vid, expect.any(Object), "reference.rewrite", rid,
+    );
+  });
+  it("keeps the full current version as the baseline for a result-analysis suggestion", async () => {
+    const h = harness();
+    const response = await h.request({
+      action: "reference.rewrite",
+      workspaceId: wid,
+      versionId: vid,
+      requestId: rid,
+      analysisId: "55555555-5555-4555-8555-555555555555",
+      suggestionId: "1",
+    });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(h.generate.mock.calls[0][0].text).current).toEqual(bundle);
+    expect(h.store.save).toHaveBeenCalledWith(
+      uid, workspace, vid, expect.any(Object), "reference.rewrite", rid,
+    );
+  });
   it.each(["six", "foreign", "missing-index"])(
     "rejects unsafe image mapping %s before quota admission or model usage",
     async (type) => {
@@ -738,3 +787,4 @@ describe("authenticated team AI chain", () => {
     ).toBe(413);
   });
 });
+

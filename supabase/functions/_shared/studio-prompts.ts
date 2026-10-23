@@ -22,14 +22,19 @@ export function buildStudioPrompt(
   workspace: StudioWorkspace,
   version: StudioVersion | null,
   suggestion = "",
+  fromInputInspection = false,
 ): GeminiInput {
   const references = workspaceReferences(workspace);
   const intent = workspace.intent ?? "replicate";
+  // Input diagnosis and its suggestions must not inherit an old model's claims.
+  // The handler still retains the parent version for branch-safe persistence.
+  const baseline =
+    action === "prompt.inspect" || fromInputInspection ? null : version;
   const context = JSON.stringify({
     original: workspace.source_text,
     keep: workspace.keep_text,
     change: workspace.change_text,
-    current: version?.bundle ?? null,
+    current: baseline?.bundle ?? null,
     requestedSuggestion: suggestion,
     imageCount: references.length,
     images: references.map((image, index) => ({
@@ -67,13 +72,16 @@ ${imageRules}
       : workspace.mode === "reference"
         ? TEMPLATE_SYSTEMS.migration
         : TEMPLATE_SYSTEMS.text;
-  const revision = version
+  const revision = baseline
     ? `\n后续版本的最小修改规则（优先于精简或重新提炼要求）：
 以 current 中的完整中英文与 structured 为基线，只修改用户明确要求或 requestedSuggestion 指定的内容。未要求改变的主体外观、纹理、标牌、配件、相对位置、构图、视角、光线、材质、色彩与环境细节必须逐项保留。
+原文 original、保留要求 keep 和附图证据优先于旧版 current 的模型描述。旧版不是事实来源：旧版误认的品牌文字、功能或图号必须纠正为有证据的表述，不能作为固定要素继续保留。用户要求补全完整正文时，应从参考图补齐重要细节，不能以最小修改为由保留旧版摘要。
 不得为了简洁而概括、缩短、合并或遗漏已有细节；新增一个背景物件不代表可以重写或简化主体。保留全部现有 structured 字段名称，不合并字段，允许增加字段；明确要求删除的内容在原字段中说明已按要求移除。
 例如当前为“白色竖条纹咖啡机、黑色屏幕、橙色标牌、透明奶罐”，建议仅为“补全右侧置物架”，新版本仍须包含这四个机身细节，再补充置物架；不能缩写为“白色咖啡机配奶罐”。
 中文、英文和 JSON 都输出可以独立使用的完整新版本，不只输出差异。输出前核对保留项与修改项的一致性，但不要输出核对过程。`
-    : "";
+    : fromInputInspection
+      ? "\n本次应用的是原文分析建议：依据 original、keep、全部附图与 requestedSuggestion 重新构建完整成稿，不沿用历史版本的摘要或猜测。建议是具体补充要求，不能替代其他原文目标或保留要求。"
+      : "";
   const strategy =
     intent === "style"
       ? "当前为风格学习：保持用户主体与产品身份，从指定参考图提取可迁移的构图、配色、光线、材质处理及场景语言。仅迁移用户明确要求的场景、人物或道具，不能默认换掉主体。"
@@ -85,3 +93,4 @@ ${imageRules}
     text: context,
   };
 }
+
