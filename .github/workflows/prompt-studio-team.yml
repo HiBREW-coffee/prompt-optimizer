@@ -37,6 +37,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: prompt-studio-team
+          include-hidden-files: true
           path: |
             packages/web/dist-team
             supabase/.temp/prompt-studio-api.ts
