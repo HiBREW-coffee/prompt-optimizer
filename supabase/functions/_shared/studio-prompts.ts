@@ -40,5 +40,12 @@ ${workspace.mode === "reference" ? "必须观察所附原始参考图，对照�
       : workspace.mode === "reference"
         ? TEMPLATE_SYSTEMS.migration
         : TEMPLATE_SYSTEMS.text;
-  return { system: `${base}\n\n${bundleContract}`, text: context };
+  const revision = version
+    ? `\n后续版本的最小修改规则（优先于精简或重新提炼要求）：
+以 current 中的完整中英文与 structured 为基线，只修改用户明确要求或 requestedSuggestion 指定的内容。未要求改变的主体外观、纹理、标牌、配件、相对位置、构图、视角、光线、材质、色彩与环境细节必须逐项保留。
+不得为了简洁而概括、缩短、合并或遗漏已有细节；新增一个背景物件不代表可以重写或简化主体。保留全部现有 structured 字段名称，不合并字段，允许增加字段；明确要求删除的内容在原字段中说明已按要求移除。
+例如当前为“白色竖条纹咖啡机、黑色屏幕、橙色标牌、透明奶罐”，建议仅为“补全右侧置物架”，新版本仍须包含这四个机身细节，再补充置物架；不能缩写为“白色咖啡机配奶罐”。
+中文、英文和 JSON 都输出可以独立使用的完整新版本，不只输出差异。输出前核对保留项与修改项的一致性，但不要输出核对过程。`
+    : "";
+  return { system: `${base}\n\n${bundleContract}${revision}`, text: context };
 }

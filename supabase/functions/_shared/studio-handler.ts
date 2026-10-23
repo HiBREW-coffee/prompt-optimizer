@@ -231,6 +231,16 @@ export function createStudioHandler(deps: HandlerDependencies) {
       if (controller.signal.aborted)
         throw new StudioError("REQUEST_TIMEOUT", 504);
       const parsed = parseObject(raw);
+      const bundle =
+        action === "prompt.evaluate" ? null : normalizeBundle(parsed);
+      if (bundle && version && (action === "reference.rewrite" || suggestion)) {
+        if (
+          Object.keys(version.bundle.structured).some(
+            (key) => !Object.hasOwn(bundle.structured, key),
+          )
+        )
+          throw new StudioError("MODEL_DETAIL_LOSS", 502);
+      }
       const result =
         action === "prompt.evaluate"
           ? await store.analyze(
@@ -244,7 +254,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
               user.id,
               workspace,
               version?.id ?? null,
-              normalizeBundle(parsed),
+              bundle!,
               action,
               id,
             );

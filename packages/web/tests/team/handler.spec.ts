@@ -50,17 +50,13 @@ function harness(overrides: Partial<StudioStore> = {}) {
         new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]),
       ),
     suggestion: vi.fn().mockResolvedValue("具体修改"),
-    save: vi
-      .fn()
-      .mockImplementation(async (_u, _w, _p, b) => ({
-        version: { ...version, bundle: b },
-        became_current: true,
-      })),
-    analyze: vi
-      .fn()
-      .mockImplementation(async (_u, _v, result, context) => ({
-        analysis: { version_id: vid, result, context },
-      })),
+    save: vi.fn().mockImplementation(async (_u, _w, _p, b) => ({
+      version: { ...version, bundle: b },
+      became_current: true,
+    })),
+    analyze: vi.fn().mockImplementation(async (_u, _v, result, context) => ({
+      analysis: { version_id: vid, result, context },
+    })),
     fail: vi.fn().mockResolvedValue(undefined),
     command: vi.fn().mockResolvedValue({ ok: true }),
     ...overrides,
@@ -187,13 +183,11 @@ describe("authenticated team AI chain", () => {
   });
   it("text optimization does not download an image", async () => {
     const h = harness({
-      workspace: vi
-        .fn()
-        .mockResolvedValue({
-          ...workspace,
-          mode: "text",
-          reference_path: null,
-        }),
+      workspace: vi.fn().mockResolvedValue({
+        ...workspace,
+        mode: "text",
+        reference_path: null,
+      }),
     });
     expect(
       (
@@ -205,6 +199,79 @@ describe("authenticated team AI chain", () => {
       ).status,
     ).toBe(200);
     expect(h.store.image).not.toHaveBeenCalled();
+  });
+  it("rejects a rewrite that merges away existing structured fields without saving or retrying", async () => {
+    const h = harness({
+      version: vi
+        .fn()
+        .mockResolvedValue({
+          ...version,
+          bundle: {
+            ...bundle,
+            structured: {
+              主体: "白色竖条纹咖啡机、黑屏、橙色标牌",
+              光线: "左侧柔光",
+              场景: "厨房",
+            },
+          },
+        }),
+    });
+    h.generate.mockResolvedValue(
+      JSON.stringify({
+        ...bundle,
+        structured: { 主体: "白色咖啡机", 场景光线: "厨房左侧柔光" },
+      }),
+    );
+    const response = await h.request({
+      action: "reference.rewrite",
+      workspaceId: wid,
+      versionId: vid,
+      requestId: rid,
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({ error: "MODEL_DETAIL_LOSS" });
+    expect(h.store.save).not.toHaveBeenCalled();
+    expect(h.store.fail).toHaveBeenCalledWith(rid, uid, "MODEL_DETAIL_LOSS");
+    expect(h.generate).toHaveBeenCalledTimes(1);
+    expect(
+      JSON.parse(h.generate.mock.calls[0][0].text).current.structured,
+    ).toEqual({
+      主体: "白色竖条纹咖啡机、黑屏、橙色标牌",
+      光线: "左侧柔光",
+      场景: "厨房",
+    });
+  });
+  it("saves a complete reference revision retaining every existing structured field", async () => {
+    const h = harness();
+    h.generate.mockResolvedValue(
+      JSON.stringify({
+        ...bundle,
+        structured: {
+          ...bundle.structured,
+          accessory: "right-side storage shelf",
+        },
+      }),
+    );
+    const response = await h.request({
+      action: "reference.rewrite",
+      workspaceId: wid,
+      versionId: vid,
+      requestId: rid,
+    });
+    expect(response.status).toBe(200);
+    expect(h.store.save).toHaveBeenCalledWith(
+      uid,
+      expect.anything(),
+      vid,
+      expect.objectContaining({
+        structured: {
+          subject: "silver coffee machine",
+          accessory: "right-side storage shelf",
+        },
+      }),
+      "reference.rewrite",
+      rid,
+    );
   });
   it.each([null, { role: "member", active: false }])(
     "rejects non-members without touching model or workspaces (%s)",
@@ -225,12 +292,10 @@ describe("authenticated team AI chain", () => {
   );
   it("rejects another user’s reference path before admission", async () => {
     const h = harness({
-      workspace: vi
-        .fn()
-        .mockResolvedValue({
-          ...workspace,
-          reference_path: "another-user/abc.png",
-        }),
+      workspace: vi.fn().mockResolvedValue({
+        ...workspace,
+        reference_path: "another-user/abc.png",
+      }),
     });
     expect(
       (
@@ -278,12 +343,10 @@ describe("authenticated team AI chain", () => {
   );
   it("replays a completed request without charging again", async () => {
     const h = harness({
-      begin: vi
-        .fn()
-        .mockResolvedValue({
-          accepted: false,
-          request: { status: "succeeded", result: { version } },
-        }),
+      begin: vi.fn().mockResolvedValue({
+        accepted: false,
+        request: { status: "succeeded", result: { version } },
+      }),
     });
     expect(
       (

@@ -54,6 +54,8 @@ const errors: Record<string, string> = {
   REQUEST_CONFLICT: "这次请求的内容已变化，请重新发起。",
   STALE_ANALYSIS: "需求或版本已变化，请重新分析后再应用建议。",
   INVALID_MODEL_OUTPUT: "模型未返回完整的中英及结构化结果，请重试。",
+  MODEL_DETAIL_LOSS:
+    "这次改写遗漏了原版本的结构字段，未保存新版本。请缩小修改范围后手动重试。",
   INCOMPLETE_MODEL_OUTPUT: "模型返回被截断或拒绝，请调整要求后重试。",
   INVALID_IMAGE: "请上传 10MB 以内的 PNG 或 JPEG 图片。",
   IMAGE_REQUIRED: "请先上传参考图。",
