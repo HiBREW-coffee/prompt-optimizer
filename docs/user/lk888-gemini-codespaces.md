@@ -28,6 +28,49 @@ Vite -> fixed upstream:
 The project's existing Gemini SDK still assembles `/v1beta/models/...`.
 **Do not append `/v1beta` or `:generateContent` to the base URL field.**
 
+## Connection passes, but optimization / prompt-quality evaluation returns 404
+
+The connection test (`LLMService.testConnection`) calls the non-streaming
+`GeminiAdapter.sendMessage` / SDK `models.generateContent` route. Interactive
+optimization (`PromptService` streaming methods) and text quality evaluation
+(`EvaluationService.evaluateStream` → `LLMService.sendMessageStream`) call SDK
+`models.generateContentStream`. The actual installed SDK requests:
+
+```
+POST /api/ps-gemini/v1beta/models/gem-3.8-flash:streamGenerateContent?alt=sse
+```
+
+The development proxy allows this exact operation and preserves `alt=sse`.
+A successful connection test therefore does not establish streaming support.
+The reported symptoms are consistent with an upstream streaming route missing;
+this has been reproduced with a simulated 404, not verified against a live account.
+
+For the fixed `/api/ps-gemini` bridge (or the exact `https://api.lk888.ai` origin),
+the Gemini adapter retries once using `generateContent` when streaming returns
+HTTP **404, 405 or 501 before any response chunk**. It preserves the model ID,
+contents, system instruction, parameters, image data and tools. Existing stream
+callbacks receive the complete answer once, so optimization can finish and the
+quality evaluator can parse its JSON normally. During fallback the answer appears
+all at once after a wait. Healthy streaming continues unchanged.
+
+There is no fallback for other providers, authentication failures, rate limits,
+timeouts, cancellation, or a stream that has already yielded any chunk (including
+metadata, reasoning or tools). A failed non-streaming request remains an error;
+the adapter does not probe alternate models or hosts. If both routes return 404,
+check the configured model ID and the vendor's route availability.
+
+After pulling this change, restart `pnpm dev` to rebuild core/UI, reload the page,
+save/select the LK888 model, then try optimization and prompt-quality evaluation.
+The current origin must use the Vite development bridge; production deployments
+still require their own server route. No API key is needed for the regression tests:
+
+```
+pnpm -F @prompt-optimizer/core exec vitest run tests/unit/llm tests/unit/evaluation tests/unit/template/prompt-studio-presets.test.ts
+pnpm -F @prompt-optimizer/core typecheck
+pnpm -F @prompt-optimizer/core build
+pnpm -F @prompt-optimizer/web exec vitest run tests/unit/gemini-bridge.spec.ts
+```
+
 ## Security / deployment notes
 
 - Keep Codespaces port **18181 private**. The API key is still configured in the
@@ -39,7 +82,8 @@ The project's existing Gemini SDK still assembles `/v1beta/models/...`.
 - The proxy target is intentionally fixed to `https://api.lk888.ai` to avoid
   turning your site into a general open proxy.
 - If the request returns 401/403 after using the bridge, confirm the upstream
-  API key and account access. If it returns 404, verify the model ID. If the
+  API key and account access locally, without sharing the key. If both generation
+  routes return 404, verify the model ID. If the
   upstream connection times out, check Codespaces network reachability.
 - Only use API keys provided to you by the vendor. Do not paste secrets into
   chat or commit `.env` with credentials.

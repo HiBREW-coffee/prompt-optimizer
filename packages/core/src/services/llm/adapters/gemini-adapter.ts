@@ -514,6 +514,48 @@ export class GeminiAdapter extends AbstractTextProviderAdapter {
 
   // ===== 核心方法实现 =====
 
+  /** Only the fixed LK888 bridge/vendor may retry unsupported streaming routes. */
+  private isLk888Endpoint(baseURL?: string): boolean {
+    if (!baseURL) return false
+    if (/^\/api\/ps-gemini\/?$/.test(baseURL)) return true
+    try {
+      const url = new URL(baseURL)
+      if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+        return false
+      }
+      return /^\/api\/ps-gemini\/?$/.test(url.pathname)
+        || (url.origin === 'https://api.lk888.ai' && /^\/?$/.test(url.pathname))
+    } catch {
+      return false
+    }
+  }
+
+  private async *generateStreamWithFallback(
+    client: GoogleGenAI,
+    config: TextModelConfig,
+    request: Parameters<GoogleGenAI['models']['generateContent']>[0]
+  ) {
+    let receivedChunk = false
+    try {
+      const stream = await client.models.generateContentStream(request)
+      for await (const chunk of stream) {
+        // Even a metadata/tool/thought-only chunk means generation has started.
+        receivedChunk = true
+        yield chunk
+      }
+      return
+    } catch (error) {
+      const status = (error as { status?: unknown } | null)?.status
+      if (receivedChunk || !this.isLk888Endpoint(config.connectionConfig.baseURL)
+        || ![404, 405, 501].includes(status as number)) {
+        throw error
+      }
+    }
+    // Same client, model, contents, system instruction and tools; no alternate host
+    // or model probing. A failed fallback propagates through the normal error path.
+    yield await client.models.generateContent(request)
+  }
+
   /**
    * 发送消息（结构化格式）
    * 使用新版 SDK 的 models.generateContent API
@@ -654,7 +696,7 @@ export class GeminiAdapter extends AbstractTextProviderAdapter {
         }
       ]
 
-      const responseStream = await client.models.generateContentStream({
+      const responseStream = this.generateStreamWithFallback(client, config, {
         model: config.modelMeta.id,
         contents,
         config: generationConfig
@@ -799,7 +841,7 @@ export class GeminiAdapter extends AbstractTextProviderAdapter {
       const contents = this.formatMessages(conversationMessages)
 
       // 调用新版流式 API
-      const responseStream = await client.models.generateContentStream({
+      const responseStream = this.generateStreamWithFallback(client, config, {
         model: config.modelMeta.id,
         contents,
         config: generationConfig
@@ -870,6 +912,16 @@ export class GeminiAdapter extends AbstractTextProviderAdapter {
    * @param callbacks 流式响应回调
    * @throws SDK原始错误（保留完整堆栈）
    */
+  public override async sendMessageStreamWithTools(
+    messages: Message[],
+    config: TextModelConfig,
+    tools: ToolDefinition[],
+    callbacks: StreamHandlers
+  ): Promise<void> {
+    this.validateMessages(messages)
+    await this.doSendMessageStreamWithTools(messages, config, tools, callbacks)
+  }
+
   protected async doSendMessageStreamWithTools(
     messages: Message[],
     config: TextModelConfig,
@@ -913,7 +965,7 @@ export class GeminiAdapter extends AbstractTextProviderAdapter {
       const contents = this.formatMessages(conversationMessages)
 
       // 调用新版流式 API
-      const responseStream = await client.models.generateContentStream({
+      const responseStream = this.generateStreamWithFallback(client, config, {
         model: config.modelMeta.id,
         contents,
         config: generationConfig

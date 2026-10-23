@@ -36,6 +36,12 @@ describe('Gemini compatibility development bridge', () => {
       .toBeUndefined()
   })
 
+  it('allows the SDK streaming endpoint and preserves its SSE query during rewrite', () => {
+    const url = '/api/ps-gemini/v1beta/models/gem-3.8-flash:streamGenerateContent?alt=sse'
+    expect(bypass?.({ method: 'POST', url } as any, {} as any, {} as any)).toBeUndefined()
+    expect(rewrite?.(url)).toBe('/v1beta/models/gem-3.8-flash:streamGenerateContent?alt=sse')
+  })
+
   it('rejects requests outside the allowed operations', () => {
     expect(bypass?.({ method: 'POST', url: '/api/ps-gemini/v1beta/files' } as any, {} as any, {} as any))
       .toBe(false)
