@@ -6,6 +6,7 @@ const f = vi.hoisted(() => ({
   upload: vi.fn(),
   logout: vi.fn(),
   getSession: vi.fn(),
+  recovery: vi.fn(),
   data: {
     workspaces: [] as any[],
     versions: [] as any[],
@@ -22,6 +23,7 @@ vi.mock("../../team/api", () => ({
       }),
       signOut: f.logout,
       signInWithPassword: vi.fn(),
+      resetPasswordForEmail: f.recovery,
     },
   },
   call: f.call,
@@ -54,6 +56,7 @@ beforeEach(() => {
   localStorage.clear();
   f.data = { workspaces: [], versions: [], analyses: [], library: [] };
   f.getSession.mockResolvedValue({ data: { session: { user: { id: uid } } } });
+  f.recovery.mockResolvedValue({ error: null });
   f.upload.mockResolvedValue({
     path: `${uid}/abc.png`,
     preview: "blob:preview",
@@ -339,6 +342,18 @@ describe("real team Vue workflow", () => {
         .findAll("input")
         .some((i) => i.attributes("autocomplete") === "new-password"),
     ).toBe(false);
+    wrapper.unmount();
+  });
+  it("sends a user-requested password reset back to this site without changing project defaults", async () => {
+    f.getSession.mockResolvedValue({ data: { session: null } });
+    const wrapper = await ready();
+    await wrapper.get('input[type="email"]').setValue("admin@example.com");
+    await button(wrapper, "忘记密码 / 首次设置密码").trigger("click");
+    await flushPromises();
+    expect(f.recovery).toHaveBeenCalledWith("admin@example.com", {
+      redirectTo: location.origin,
+    });
+    expect(wrapper.text()).toContain("你会收到密码重设链接");
     wrapper.unmount();
   });
 });

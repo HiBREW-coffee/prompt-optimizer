@@ -167,6 +167,24 @@ async function savePassword() {
     notice.value = "密码已设置。";
   });
 }
+async function recoverPassword() {
+  await attempt(async () => {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim())) {
+      error.value = "请先填写账号邮箱。";
+      return;
+    }
+    const { error: recoveryError } = await db!.auth.resetPasswordForEmail(
+      email.value.trim(),
+      {
+        redirectTo: location.origin,
+      },
+    );
+    if (recoveryError) throw new Error("RECOVERY_FAILED");
+    password.value = "";
+    notice.value =
+      "如该邮箱可以接收账号邮件，你会收到密码重设链接。请在邮件中打开链接设置新密码。";
+  });
+}
 async function logout() {
   if (busy.value || !mayLeaveEditor()) return;
   await db!.auth.signOut();
@@ -733,7 +751,16 @@ onBeforeUnmount(() => {
       <p v-if="error" role="alert" class="error">{{ error }}</p>
       <button class="primary" :disabled="busy">
         {{ busy ? "正在登录…" : "登录工作室" }}</button
-      ><small>仅限受邀成员。首次使用请联系管理员获取邀请链接。</small>
+      ><button
+        type="button"
+        class="quiet"
+        :disabled="busy"
+        @click="recoverPassword"
+      >
+        忘记密码 / 首次设置密码
+      </button>
+      <p v-if="notice" role="status">{{ notice }}</p>
+      <small>仅限受邀成员。首次使用请联系管理员获取账号。</small>
     </form>
   </div>
   <div v-else-if="loading" class="gate" role="status">

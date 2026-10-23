@@ -72,6 +72,8 @@ const errors: Record<string, string> = {
   MEMBER_CREATE_FAILED: "成员未创建，请检查邮箱和密码要求后重试。",
   PASSWORD_UPDATE_FAILED: "密码未修改，请检查密码要求后重试。",
   SHARED_ACCOUNT_PASSWORD: "此账号也用于其他应用。请让成员登录后自行修改密码。",
+  RECOVERY_FAILED:
+    "暂时无法发送密码重设邮件。请稍后重试，或联系管理员检查邮件设置。",
 };
 export function message(error: unknown): string {
   if (error instanceof Error && errors[error.message])
