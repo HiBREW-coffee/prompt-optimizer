@@ -1,0 +1,8 @@
+project_id = "prompt-studio-team"
+
+# Auth is verified with Auth.getUser in the handler, including application membership.
+# Required for projects using asymmetric signing keys and publishable API keys.
+[functions.prompt-studio-api]
+verify_jwt = false
+entrypoint = "./functions/prompt-studio-api/index.ts"
+import_map = "./functions/prompt-studio-api/deno.json"

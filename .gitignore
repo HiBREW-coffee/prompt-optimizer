@@ -202,3 +202,7 @@ AGENTS.md
 .codex-run/
 .codex-tmp/
 .trellis/
+
+# Team deployment artifacts and local platform sessions
+supabase/.temp/
+supabase/functions/prompt-studio-api/deno.lock

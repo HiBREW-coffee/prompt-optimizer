@@ -11,16 +11,23 @@
     "test": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
-    "test:unit": "vitest run tests/unit"
+    "test:unit": "vitest run tests/unit",
+    "dev:team": "vite --config vite.team.config.ts",
+    "build:team": "vite build --config vite.team.config.ts",
+    "typecheck:team": "vue-tsc --noEmit -p tsconfig.team.json",
+    "test:team": "vitest run tests/team"
   },
   "dependencies": {
     "@prompt-optimizer/ui": "workspace:*",
+    "@supabase/supabase-js": "2.118.0",
     "vue": "^3.5.31"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
     "@vitejs/plugin-vue": "^6.0.5",
     "jsdom": "^29.0.1",
     "vite": "^8.3.0",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "@vue/test-utils": "^2.4.6"
   }
 }

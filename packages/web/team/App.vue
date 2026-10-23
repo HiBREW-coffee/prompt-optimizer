@@ -1,0 +1,1347 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import type { User } from "@supabase/supabase-js";
+import {
+  db,
+  call,
+  rows,
+  uploadImage,
+  signedImage,
+  download,
+  exportPrivateData,
+  message,
+  needsPassword,
+  SOURCE_URL,
+} from "./api";
+import type {
+  StudioMode,
+  StudioWorkspace,
+  StudioVersion,
+  PromptBundle,
+  AnalysisRow,
+  LibraryRow,
+} from "./api";
+import { normalizeBundle } from "../../../supabase/functions/_shared/studio-contract";
+
+type Page =
+  "reference" | "text" | "history" | "library" | "favorites" | "admin";
+type Member = {
+  user_id: string;
+  email: string;
+  role: string;
+  active: boolean;
+  daily_limit: number | null;
+};
+const user = ref<User | null>(null),
+  member = ref<Member | null>(null),
+  page = ref<Page>("reference");
+const loading = ref(true),
+  busy = ref(false),
+  notice = ref(""),
+  error = ref(""),
+  email = ref(""),
+  password = ref(""),
+  setPassword = ref(needsPassword);
+const title = ref(""),
+  source = ref(""),
+  keep = ref(""),
+  change = ref(""),
+  imagePath = ref<string | null>(null),
+  imagePreview = ref("");
+const workspace = ref<StudioWorkspace | null>(null),
+  versions = ref<StudioVersion[]>([]),
+  selected = ref<StudioVersion | null>(null);
+const draftZh = ref(""),
+  draftEn = ref(""),
+  draftJson = ref(""),
+  outputTab = ref<"zh" | "en" | "json">("zh"),
+  analysis = ref<AnalysisRow | null>(null);
+const workspaces = ref<StudioWorkspace[]>([]),
+  library = ref<LibraryRow[]>([]),
+  favoriteIds = ref<string[]>([]),
+  members = ref<Member[]>([]);
+const settings = ref({
+    member_daily: 50,
+    team_daily: 200,
+    user_concurrent: 1,
+    team_concurrent: 2,
+  }),
+  used = ref(0),
+  dailyLimit = ref(50),
+  configured = ref(true);
+const search = ref(""),
+  compareId = ref(""),
+  publishOpen = ref(false),
+  shareImage = ref(false),
+  inviteEmail = ref(""),
+  inviteUrl = ref(""),
+  pendingId = ref("");
+const mode = computed<StudioMode>(() =>
+  page.value === "text" ? "text" : "reference",
+);
+const isEditor = computed(
+  () => page.value === "reference" || page.value === "text",
+);
+const dirty = computed(
+  () =>
+    !!selected.value &&
+    (draftZh.value !== selected.value.bundle.zh ||
+      draftEn.value !== selected.value.bundle.en ||
+      draftJson.value !==
+        JSON.stringify(selected.value.bundle.structured, null, 2)),
+);
+const analysisStale = computed(
+  () =>
+    !analysis.value ||
+    analysis.value.version_id !== selected.value?.id ||
+    dirty.value ||
+    analysis.value.context.keep !== keep.value ||
+    analysis.value.context.change !== change.value ||
+    analysis.value.context.source !== source.value,
+);
+const previous = computed(() =>
+  versions.value.find((v) => v.id === compareId.value),
+);
+const filteredHistory = computed(() =>
+  workspaces.value.filter(
+    (w) =>
+      (page.value !== "favorites" || w.favorite) &&
+      w.title.toLowerCase().includes(search.value.toLowerCase()),
+  ),
+);
+const filteredLibrary = computed(() =>
+  library.value.filter(
+    (w) =>
+      (page.value !== "favorites" || favoriteIds.value.includes(w.id)) &&
+      w.title.toLowerCase().includes(search.value.toLowerCase()),
+  ),
+);
+let authSubscription: { unsubscribe(): void } | undefined;
+const explain = (e: unknown) => {
+  error.value = message(e);
+};
+async function attempt(fn: () => Promise<void>) {
+  if (busy.value) return;
+  busy.value = true;
+  error.value = "";
+  notice.value = "";
+  try {
+    await fn();
+  } catch (e) {
+    explain(e);
+  } finally {
+    busy.value = false;
+  }
+}
+async function login() {
+  await attempt(async () => {
+    const { error: e } = await db!.auth.signInWithPassword({
+      email: email.value,
+      password: password.value,
+    });
+    if (e) throw new Error("UNAUTHENTICATED");
+    password.value = "";
+  });
+}
+async function savePassword() {
+  await attempt(async () => {
+    if (password.value.length < 12) {
+      error.value = "请使用至少 12 位的密码。";
+      return;
+    }
+    const { error: e } = await db!.auth.updateUser({
+      password: password.value,
+    });
+    if (e) throw e;
+    password.value = "";
+    setPassword.value = false;
+    notice.value = "密码已设置。";
+  });
+}
+async function logout() {
+  if (busy.value || !mayLeaveEditor()) return;
+  await db!.auth.signOut();
+  member.value = null;
+  user.value = null;
+  resetEditor();
+  workspaces.value = [];
+  library.value = [];
+  members.value = [];
+  inviteUrl.value = "";
+  pendingId.value = "";
+}
+async function loadMember() {
+  if (!user.value || !db) return;
+  loading.value = true;
+  error.value = "";
+  try {
+    const found = await rows<Member>("ps_members", (q) =>
+      q.eq("user_id", user.value!.id),
+    );
+    member.value = found[0] ?? null;
+    if (!member.value?.active) return;
+    const status = await call<{
+      configured: boolean;
+      settings: typeof settings.value;
+      used: number;
+      dailyLimit: number;
+    }>("status");
+    settings.value = status.settings;
+    used.value = status.used;
+    dailyLimit.value = status.dailyLimit;
+    configured.value = status.configured;
+    pendingId.value = localStorage.getItem(`ps-pending-${user.value.id}`) || "";
+    await loadLists();
+  } catch (e) {
+    explain(e);
+  } finally {
+    loading.value = false;
+  }
+}
+async function loadLists() {
+  const owner = user.value?.id;
+  const [w, l, f] = await Promise.all([
+    rows<StudioWorkspace>("ps_workspaces", (q) =>
+      q.order("updated_at", { ascending: false }),
+    ),
+    rows<LibraryRow>("ps_library", (q) =>
+      q.order("created_at", { ascending: false }),
+    ),
+    rows<{ library_id: string }>("ps_library_favorites"),
+  ]);
+  if (user.value?.id !== owner) return;
+  workspaces.value = w;
+  library.value = l;
+  favoriteIds.value = f.map((x) => x.library_id);
+  if (member.value?.role === "admin")
+    members.value = await rows<Member>("ps_members", (q) =>
+      q.order("created_at"),
+    );
+}
+function resetEditor() {
+  workspace.value = null;
+  versions.value = [];
+  selected.value = null;
+  analysis.value = null;
+  title.value = "";
+  source.value = "";
+  keep.value = "";
+  change.value = "";
+  imagePath.value = null;
+  if (imagePreview.value.startsWith("blob:"))
+    URL.revokeObjectURL(imagePreview.value);
+  imagePreview.value = "";
+  draftZh.value = "";
+  draftEn.value = "";
+  draftJson.value = "";
+  compareId.value = "";
+  outputTab.value = "zh";
+}
+function navigate(target: Page) {
+  if (busy.value || !mayLeaveEditor()) return;
+  if ((target === "reference" || target === "text") && target !== page.value)
+    resetEditor();
+  page.value = target;
+  search.value = "";
+  error.value = "";
+  notice.value = "";
+  if (!isEditor.value) void loadLists().catch(explain);
+}
+function newWork() {
+  if (!mayLeaveEditor()) return;
+  resetEditor();
+  notice.value = "已新建，之前保存的作品可在历史记录中查看。";
+}
+async function chooseImage(event: Event) {
+  await attempt(async () => {
+    const file = (event.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    if (selected.value) {
+      error.value = "更换参考图请先新建作品。";
+      return;
+    }
+    const result = await uploadImage(file, user.value!.id);
+    imagePath.value = result.path;
+    if (imagePreview.value.startsWith("blob:"))
+      URL.revokeObjectURL(imagePreview.value);
+    imagePreview.value = result.preview;
+    notice.value = "参考图已存入私人空间。";
+  });
+  (event.target as HTMLInputElement).value = "";
+}
+async function saveWorkspace() {
+  const result = await call<{ workspace: StudioWorkspace }>("workspace.save", {
+    workspaceId: workspace.value?.id,
+    mode: mode.value,
+    title: title.value || source.value.slice(0, 28) || "参考图提炼",
+    sourceText: source.value,
+    keepText: keep.value,
+    changeText: change.value,
+    referencePath: imagePath.value,
+  });
+  if (result.workspace.owner_id !== user.value?.id) throw new Error("UNAUTHENTICATED");
+  workspace.value = result.workspace;
+  title.value = result.workspace.title;
+  return result.workspace;
+}
+async function showVersion(version: StudioVersion) {
+  selected.value = version;
+  draftZh.value = version.bundle.zh;
+  draftEn.value = version.bundle.en;
+  draftJson.value = JSON.stringify(version.bundle.structured, null, 2);
+  analysis.value = null;
+  const found = await rows<AnalysisRow>("ps_analyses", (q) =>
+    q.eq("version_id", version.id).order("created_at", { ascending: false }), 1);
+  if (selected.value?.id === version.id) analysis.value = found[0] ?? null;
+}
+async function loadVersions(prefer?: string) {
+  if (!workspace.value) return;
+  versions.value = await rows<StudioVersion>("ps_versions", (q) =>
+    q
+      .eq("workspace_id", workspace.value!.id)
+      .order("sequence", { ascending: false }),
+  );
+  const version =
+    versions.value.find(
+      (v) => v.id === (prefer || workspace.value!.current_version_id),
+    ) || versions.value[0];
+  if (version) await showVersion(version);
+}
+function mayLeaveEditor() {
+  if (!dirty.value) return true;
+  error.value = "还有未保存的编辑，请先保存后再切换。";
+  return false;
+}
+async function chooseVersion(event: Event) {
+  const input = event.target as HTMLSelectElement;
+  if (!mayLeaveEditor()) { input.value = selected.value?.id ?? ""; return; }
+  const version = versions.value.find(v => v.id === input.value);
+  if (version) await attempt(() => showVersion(version));
+}
+async function openWork(w: StudioWorkspace) {
+  await attempt(async () => {
+    resetEditor();
+    page.value = w.mode === "reference" ? "reference" : "text";
+    workspace.value = w;
+    title.value = w.title;
+    source.value = w.source_text;
+    keep.value = w.keep_text;
+    change.value = w.change_text;
+    imagePath.value = w.reference_path;
+    if (w.reference_path)
+      imagePreview.value = await signedImage(w.reference_path);
+    await loadVersions();
+  });
+}
+function bundleFromEditor(): PromptBundle {
+  let structured: unknown;
+  try {
+    structured = JSON.parse(draftJson.value);
+  } catch {
+    throw new Error("INVALID_MODEL_OUTPUT");
+  }
+  return normalizeBundle({
+    zh: draftZh.value,
+    en: draftEn.value,
+    structured,
+    observations: selected.value?.bundle.observations ?? [],
+    uncertainties: selected.value?.bundle.uncertainties ?? [],
+  });
+}
+async function saveDraft() {
+  const w = await saveWorkspace();
+  if (!selected.value || !dirty.value) return;
+  const data = await call<{ version: StudioVersion; became_current: boolean }>(
+    "version.save",
+    {
+      workspaceId: w.id,
+      versionId: selected.value.id,
+      bundle: bundleFromEditor(),
+    },
+  );
+  await acceptVersion(data);
+  notice.value = "编辑已保存为新版本。";
+}
+async function acceptVersion(data: {
+  version: StudioVersion;
+  became_current: boolean;
+}) {
+  if (data.became_current && workspace.value)
+    workspace.value.current_version_id = data.version.id;
+  await loadVersions(data.version.id);
+  if (!data.became_current)
+    notice.value =
+      "其他页面已更新当前版本，本次结果仍已保存。可查看对比后恢复为新版本。";
+}
+async function run(
+  action:
+    | "text.optimize"
+    | "reference.extract"
+    | "reference.rewrite"
+    | "prompt.evaluate",
+  suggestionId?: string,
+) {
+  await attempt(async () => {
+    const owner = user.value?.id;
+    if (mode.value === "reference" && !imagePath.value) {
+      error.value = "请先上传参考图。";
+      return;
+    }
+    if (mode.value === "text" && !source.value.trim()) {
+      error.value = "请先输入需要优化的文字。";
+      return;
+    }
+    if (suggestionId && analysisStale.value) {
+      error.value = "请重新分析当前版本后应用建议。";
+      return;
+    }
+    const analysisId = analysis.value?.id;
+    await saveDraft();
+    const id = crypto.randomUUID();
+    pendingId.value = id;
+    localStorage.setItem(`ps-pending-${user.value!.id}`, id);
+    try {
+      const result = await call<{
+        version?: StudioVersion;
+        became_current?: boolean;
+        analysis?: AnalysisRow;
+        pending?: boolean;
+      }>(action, {
+        workspaceId: workspace.value!.id,
+        versionId: selected.value?.id,
+        requestId: id,
+        ...(suggestionId ? { analysisId, suggestionId } : {}),
+      });
+      if (user.value?.id !== owner) return;
+      if (result.pending) {
+        notice.value = "请求仍在处理，可点击查询上次结果。";
+        return;
+      }
+      if (result.version)
+        await acceptVersion({
+          version: result.version,
+          became_current: result.became_current === true,
+        });
+      if (result.analysis) analysis.value = result.analysis;
+      pendingId.value = "";
+      localStorage.removeItem(`ps-pending-${user.value!.id}`);
+      used.value++;
+      await loadLists();
+    } catch (e) {
+      notice.value = "可查询上次结果，避免重复发起模型调用。";
+      throw e;
+    }
+  });
+}
+async function checkPending() {
+  await attempt(async () => {
+    const result = await rows<{
+      status: string;
+      result: {
+        version?: StudioVersion;
+        became_current?: boolean;
+        analysis?: AnalysisRow;
+      };
+      error_code: string;
+      workspace_id: string;
+      expires_at: string;
+    }>("ps_requests", (q) => q.eq("id", pendingId.value));
+    const request = result[0];
+    if (!request) {
+      notice.value = "上次请求未被后台接收，可以重新发起。";
+    } else if (
+      request.status === "running" &&
+      new Date(request.expires_at).getTime() > Date.now()
+    ) {
+      notice.value = "上次请求仍在处理，请稍后再查询。";
+      return;
+    } else if (request.status === "succeeded") {
+      const found = workspaces.value.find((w) => w.id === request.workspace_id);
+      if (found) {
+        resetEditor();
+        page.value = found.mode === "reference" ? "reference" : "text";
+        workspace.value = found;
+        title.value = found.title;
+        source.value = found.source_text;
+        keep.value = found.keep_text;
+        change.value = found.change_text;
+        imagePath.value = found.reference_path;
+        if (found.reference_path)
+          imagePreview.value = await signedImage(found.reference_path);
+        await loadVersions(
+          request.result.version?.id || request.result.analysis?.version_id,
+        );
+        if (request.result.analysis) analysis.value = request.result.analysis;
+      }
+      notice.value = "上次结果已恢复。";
+    } else {
+      notice.value = "上次请求未完成，可以手动重试。";
+    }
+    pendingId.value = "";
+    localStorage.removeItem(`ps-pending-${user.value!.id}`);
+  });
+}
+async function restore() {
+  await attempt(async () => {
+    if (!selected.value || !workspace.value) return;
+    const data = await call<{
+      version: StudioVersion;
+      became_current: boolean;
+    }>("version.restore", {
+      workspaceId: workspace.value.id,
+      versionId: workspace.value.current_version_id,
+      restoreId: selected.value.id,
+    });
+    source.value = String(data.version.context.source ?? "");
+    keep.value = String(data.version.context.keep ?? "");
+    change.value = String(data.version.context.change ?? "");
+    await acceptVersion(data);
+    notice.value = "已恢复为新版本，历史版本仍保留。";
+  });
+}
+async function copy() {
+  await attempt(async () => {
+    await navigator.clipboard.writeText(
+      outputTab.value === "zh"
+        ? draftZh.value
+        : outputTab.value === "en"
+          ? draftEn.value
+          : draftJson.value,
+    );
+    notice.value = "已复制。";
+  });
+}
+async function publish() {
+  await attempt(async () => {
+    await saveDraft();
+    await call("library.publish", {
+      workspaceId: workspace.value!.id,
+      versionId: selected.value!.id,
+      includeImage: shareImage.value,
+    });
+    publishOpen.value = false;
+    shareImage.value = false;
+    notice.value = "已发布到团队精品库。";
+    await loadLists();
+  });
+}
+async function favorite(w: StudioWorkspace) {
+  await attempt(async () => {
+    await call("workspace.favorite", {
+      workspaceId: w.id,
+      favorite: !w.favorite,
+    });
+    w.favorite = !w.favorite;
+    if (workspace.value?.id === w.id) workspace.value.favorite = w.favorite;
+  });
+}
+async function favoriteLibrary(item: LibraryRow) {
+  await attempt(async () => {
+    const query = db!.from("ps_library_favorites");
+    const { error: e } = favoriteIds.value.includes(item.id)
+      ? await query
+          .delete()
+          .eq("library_id", item.id)
+          .eq("user_id", user.value!.id)
+      : await query.insert({ user_id: user.value!.id, library_id: item.id });
+    if (e) throw e;
+    await loadLists();
+  });
+}
+async function importLibrary(item: LibraryRow) {
+  await attempt(async () => {
+    const data = await call<{
+      workspace: StudioWorkspace;
+      version: StudioVersion;
+    }>("library.import", { libraryId: item.id });
+    resetEditor();
+    const w = data.workspace;
+    page.value = w.mode === "reference" ? "reference" : "text";
+    workspace.value = w;
+    title.value = w.title;
+    source.value = w.source_text;
+    keep.value = w.keep_text;
+    change.value = w.change_text;
+    imagePath.value = w.reference_path;
+    if (w.reference_path)
+      imagePreview.value = await signedImage(w.reference_path);
+    await loadVersions(data.version.id);
+    notice.value = "已复制到私人空间，可以继续编辑。";
+  });
+}
+async function unpublish(item: LibraryRow) {
+  await attempt(async () => {
+    await call("library.unpublish", { libraryId: item.id });
+    await loadLists();
+    notice.value = "已撤回分享。";
+  });
+}
+async function invite() {
+  await attempt(async () => {
+    inviteUrl.value = "";
+    const result = await call<{ inviteUrl: string }>("member.invite", {
+      email: inviteEmail.value,
+    });
+    inviteUrl.value = result.inviteUrl;
+    await loadLists();
+  });
+}
+async function copyInvite() {
+  await attempt(async () => {
+    await navigator.clipboard.writeText(inviteUrl.value);
+    notice.value = "邀请链接已复制。";
+  });
+}
+async function updateMember(m: Member) {
+  await attempt(async () => {
+    await call("member.update", {
+      userId: m.user_id,
+      active: !m.active,
+      dailyLimit: m.daily_limit,
+    });
+    await loadLists();
+  });
+}
+watch(
+  () => user.value?.id,
+  () => {
+    resetEditor();
+    workspaces.value = [];
+    library.value = [];
+    members.value = [];
+    inviteUrl.value = "";
+    pendingId.value = "";
+    member.value = null;
+    if (user.value) void loadMember();
+    else loading.value = false;
+  },
+);
+onMounted(async () => {
+  if (!db) {
+    loading.value = false;
+    return;
+  }
+  const { data } = db.auth.onAuthStateChange((event, session) => {
+    user.value = session?.user ?? null;
+    if (event === "PASSWORD_RECOVERY") setPassword.value = true;
+  });
+  authSubscription = data.subscription;
+  const {
+    data: { session },
+  } = await db.auth.getSession();
+  user.value = session?.user ?? null;
+  if (!session) loading.value = false;
+});
+onBeforeUnmount(() => {
+  authSubscription?.unsubscribe();
+  if (imagePreview.value.startsWith("blob:"))
+    URL.revokeObjectURL(imagePreview.value);
+});
+</script>
+
+<template>
+  <div v-if="!db" class="gate">
+    <div class="gate-card">
+      <span class="eyebrow">HiBREW / PROMPT STUDIO</span>
+      <h1>团队工作室即将就绪</h1>
+      <p>网站已构建。管理员连接团队后台后，即可邀请成员使用。</p>
+      <a
+        :href="SOURCE_URL + '/docs/deploy/prompt-studio-team.md'"
+        target="_blank"
+        rel="noopener"
+        >查看部署说明</a
+      >
+    </div>
+  </div>
+  <div v-else-if="!user" class="gate">
+    <form class="gate-card" @submit.prevent="login">
+      <span class="eyebrow">HiBREW / PROMPT STUDIO</span>
+      <h1>让好的画面，<br />成为可复用的提示词。</h1>
+      <p>登录团队工作室，提炼参考图，打磨每一次表达。</p>
+      <label
+        >账号邮箱<input
+          v-model="email"
+          type="email"
+          autocomplete="username"
+          required /></label
+      ><label
+        >密码<input
+          v-model="password"
+          type="password"
+          autocomplete="current-password"
+          required
+      /></label>
+      <p v-if="error" role="alert" class="error">{{ error }}</p>
+      <button class="primary" :disabled="busy">
+        {{ busy ? "正在登录…" : "登录工作室" }}</button
+      ><small>仅限受邀成员。首次使用请联系管理员获取邀请链接。</small>
+    </form>
+  </div>
+  <div v-else-if="loading" class="gate" role="status">
+    正在打开你的私人工作空间…
+  </div>
+  <div v-else-if="!member?.active" class="gate">
+    <div class="gate-card">
+      <h1>等待团队邀请</h1>
+      <p>{{ error || "此账号尚未加入工作室，请联系管理员邀请。" }}</p>
+      <button @click="loadMember">重新检查</button
+      ><button @click="logout">退出登录</button>
+    </div>
+  </div>
+  <div v-else class="studio">
+    <aside class="sidebar">
+      <a class="brand" href="#" @click.prevent="navigate('reference')"
+        ><b>H</b><span>HiBREW<small>提示词工作室</small></span></a
+      >
+      <span class="nav-label">创作空间</span>
+      <nav aria-label="主要功能">
+        <button
+          :class="{ active: page === 'reference' }"
+          @click="navigate('reference')"
+        >
+          <span>▧</span>参考图提炼<i>重点</i></button
+        ><button :class="{ active: page === 'text' }" @click="navigate('text')">
+          <span>≋</span>文字提示词
+        </button>
+      </nav>
+      <span class="nav-label">我的资产</span>
+      <nav aria-label="作品管理">
+        <button
+          :class="{ active: page === 'history' }"
+          @click="navigate('history')"
+        >
+          历史与版本</button
+        ><button
+          :class="{ active: page === 'favorites' }"
+          @click="navigate('favorites')"
+        >
+          我的收藏</button
+        ><button
+          :class="{ active: page === 'library' }"
+          @click="navigate('library')"
+        >
+          团队精品库</button
+        ><button
+          v-if="member.role === 'admin'"
+          :class="{ active: page === 'admin' }"
+          @click="navigate('admin')"
+        >
+          团队管理
+        </button>
+      </nav>
+      <div class="sidebar-bottom">
+        <p>私人保存 · 按需分享</p>
+        <small>今日调用 {{ used }} / {{ dailyLimit }}</small
+        ><progress :value="used" :max="dailyLimit"></progress
+        ><a :href="SOURCE_URL" target="_blank" rel="noopener"
+          >开源代码 · AGPL-3.0</a
+        >
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <span
+          >团队工作室
+          <span class="muted"
+            >/ {{ isEditor ? "创作" : "作品管理" }}</span
+          ></span
+        >
+        <div>
+          <span class="account">{{ member.email }}</span
+          ><button class="quiet" @click="logout">退出</button>
+        </div>
+      </header>
+      <div class="main-content">
+        <div v-if="error" class="banner error" role="alert">
+          {{ error }}<button class="quiet" @click="error = ''">关闭</button>
+        </div>
+        <div v-if="notice" class="banner" role="status">{{ notice }}</div>
+        <div v-if="pendingId" class="banner pending">
+          有一次请求可以查询，查询不会再次调用模型。<button
+            :disabled="busy"
+            @click="checkPending"
+          >
+            查询上次结果
+          </button>
+        </div>
+        <div v-if="!configured" class="banner error">
+          模型尚未在服务器配置，请管理员完成配置后再使用。
+        </div>
+        <template v-if="isEditor"
+          ><div class="page-title">
+            <div>
+              <span class="eyebrow">{{
+                mode === "reference"
+                  ? "FROM REFERENCE TO PROMPT"
+                  : "MAKE YOUR INTENT CLEAR"
+              }}</span>
+              <h1>
+                {{
+                  mode === "reference"
+                    ? "把参考图，提炼成创作语言"
+                    : "把想法，打磨成清晰的提示词"
+                }}
+              </h1>
+              <p>
+                {{
+                  mode === "reference"
+                    ? "先忠实还原，再按你的要求调整。构图、光线与细节，都有据可循。"
+                    : "保留你的本意，补足结构与约束，让每次表达更准确。"
+                }}
+              </p>
+            </div>
+            <button :disabled="busy" @click="newWork">＋ 新建作品</button>
+          </div>
+          <div class="editor-grid">
+            <section class="panel input-panel">
+              <div class="panel-head">
+                <h2>
+                  01
+                  <span>{{
+                    mode === "reference" ? "参考与要求" : "原文与要求"
+                  }}</span>
+                </h2>
+                <span class="tag">私人空间</span>
+              </div>
+              <label
+                >作品名称<input
+                  v-model="title"
+                  maxlength="120"
+                  placeholder="给这次创作起个名字"
+                  :disabled="busy"
+              /></label>
+              <div v-if="mode === 'reference'" class="image-upload">
+                <img
+                  v-if="imagePreview"
+                  :src="imagePreview"
+                  alt="当前作品的原始参考图"
+                /><label v-if="!selected" class="upload-control"
+                  ><span>{{
+                    imagePreview ? "更换参考图" : "＋ 上传一张参考图"
+                  }}</span
+                  ><small>PNG / JPEG · 最大 10MB</small
+                  ><input
+                    type="file"
+                    accept="image/png,image/jpeg"
+                    :disabled="busy"
+                    @change="chooseImage" /></label
+                ><small v-else
+                  >原始参考图随作品保存。更换图片请新建作品。</small
+                >
+              </div>
+              <label
+                >{{
+                  mode === "reference" ? "补充说明（可选）" : "需要优化的文字"
+                }}<textarea
+                  v-model="source"
+                  :rows="mode === 'reference' ? 3 : 8"
+                  maxlength="16000"
+                  :disabled="busy"
+                  :placeholder="
+                    mode === 'reference'
+                      ? '例如：用于咖啡机产品展示，关注机位和灯光'
+                      : '粘贴原始提示词，或描述你希望完成的任务…'
+                  "
+                ></textarea>
+              </label>
+              <label
+                >需要保留<textarea
+                  v-model="keep"
+                  rows="2"
+                  maxlength="8000"
+                  :disabled="busy"
+                  placeholder="例如：相同机位、主体比例、侧面柔光"
+                ></textarea>
+              </label>
+              <label
+                >需要修改<textarea
+                  v-model="change"
+                  rows="3"
+                  maxlength="8000"
+                  :disabled="busy"
+                  placeholder="例如：主体换成银色咖啡机，桌面改为浅色石材"
+                ></textarea>
+              </label>
+              <button
+                class="primary full"
+                :disabled="busy || !configured"
+                @click="
+                  run(
+                    mode === 'text'
+                      ? 'text.optimize'
+                      : selected
+                        ? 'reference.rewrite'
+                        : 'reference.extract',
+                  )
+                "
+              >
+                {{
+                  busy
+                    ? "正在处理并保存…"
+                    : mode === "text"
+                      ? "优化并提炼"
+                      : selected
+                        ? "按要求生成新版本"
+                        : "提炼参考图提示词"
+                }}</button
+              ><small class="hint">结果自动保存。单次处理最长约 2 分钟。</small>
+            </section>
+            <section class="panel result-panel">
+              <div class="panel-head">
+                <h2>02 <span>提炼结果</span></h2>
+                <span v-if="selected" class="tag"
+                  >V{{ selected.sequence }}</span
+                >
+              </div>
+              <div v-if="!selected" class="empty-result">
+                <span class="empty-symbol">⌘</span>
+                <h3>好的提示词，从看清细节开始</h3>
+                <p>
+                  完成左侧输入后，这里会生成中文、英文及结构化结果。<br />之后可以分析、修改，并保留每次版本。
+                </p>
+              </div>
+              <template v-else
+                ><div class="result-toolbar">
+                  <div class="tabs" role="tablist" aria-label="结果格式">
+                    <button
+                      v-for="tab in ['zh', 'en', 'json'] as const"
+                      :key="tab"
+                      role="tab"
+                      :aria-selected="outputTab === tab"
+                      :class="{ active: outputTab === tab }"
+                      @click="outputTab = tab"
+                    >
+                      {{ { zh: "中文", en: "English", json: "JSON" }[tab] }}
+                    </button>
+                  </div>
+                  <button :disabled="busy" @click="copy">复制</button>
+                </div>
+                <textarea
+                  v-show="outputTab === 'zh'"
+                  v-model="draftZh"
+                  aria-label="中文提示词"
+                  class="prompt-editor"
+                  :disabled="busy"
+                ></textarea
+                ><textarea
+                  v-show="outputTab === 'en'"
+                  v-model="draftEn"
+                  aria-label="英文提示词"
+                  class="prompt-editor"
+                  :disabled="busy"
+                ></textarea
+                ><textarea
+                  v-show="outputTab === 'json'"
+                  v-model="draftJson"
+                  aria-label="结构化提示词"
+                  class="prompt-editor mono"
+                  :disabled="busy"
+                ></textarea>
+                <details
+                  v-if="
+                    selected.bundle.observations.length ||
+                    selected.bundle.uncertainties.length
+                  "
+                  class="evidence"
+                >
+                  <summary>画面事实与不确定项</summary>
+                  <h4>观察到的事实</h4>
+                  <ul>
+                    <li
+                      v-for="fact in selected.bundle.observations"
+                      :key="fact"
+                    >
+                      {{ fact }}
+                    </li>
+                  </ul>
+                  <h4>仍需确认</h4>
+                  <ul>
+                    <li
+                      v-for="fact in selected.bundle.uncertainties"
+                      :key="fact"
+                    >
+                      {{ fact }}
+                    </li>
+                  </ul>
+                </details>
+                <p v-if="dirty" class="hint">
+                  有未保存编辑。请同步检查三种格式；保存或分析时将建立新版本。
+                </p>
+                <div class="actions">
+                  <button
+                    :disabled="busy || !dirty"
+                    @click="attempt(saveDraft)"
+                  >
+                    保存编辑</button
+                  ><button
+                    class="primary"
+                    :disabled="busy || !configured"
+                    @click="run('prompt.evaluate')"
+                  >
+                    分析与修改建议</button
+                  ><button :disabled="busy" @click="favorite(workspace!)">
+                    {{ workspace?.favorite ? "已收藏" : "收藏作品" }}</button
+                  ><button
+                    :disabled="busy"
+                    @click="
+                      shareImage = false;
+                      publishOpen = true;
+                    "
+                  >
+                    发布到团队库</button
+                  ><button
+                    :disabled="busy"
+                    @click="
+                      attempt(async () => {
+                        download(
+                          'prompt-bundle.json',
+                          JSON.stringify(bundleFromEditor(), null, 2),
+                        );
+                        notice = '已导出当前结果。';
+                      })
+                    "
+                  >
+                    导出
+                  </button>
+                </div>
+                <div class="version-bar">
+                  <label
+                    >查看版本<select
+                      :value="selected.id"
+                      :disabled="busy"
+                      @change="chooseVersion"
+                    >
+                      <option v-for="v in versions" :key="v.id" :value="v.id">
+                        V{{ v.sequence }} ·
+                        {{
+                          v.kind === "manual"
+                            ? "手动编辑"
+                            : v.kind === "restore"
+                              ? "恢复版本"
+                              : "模型提炼"
+                        }}{{
+                          workspace?.current_version_id === v.id
+                            ? " · 当前"
+                            : ""
+                        }}
+                      </option>
+                    </select></label
+                  ><button
+                    v-if="selected.id !== workspace?.current_version_id"
+                    :disabled="busy || dirty"
+                    @click="restore"
+                  >
+                    恢复为新版本</button
+                  ><label
+                    >对比<select v-model="compareId">
+                      <option value="">选择历史版本</option>
+                      <option
+                        v-for="v in versions.filter(
+                          (v) => v.id !== selected!.id,
+                        )"
+                        :key="v.id"
+                        :value="v.id"
+                      >
+                        V{{ v.sequence }}
+                      </option>
+                    </select></label
+                  >
+                </div>
+                <div v-if="previous" class="comparison">
+                  <div>
+                    <h4>V{{ previous.sequence }}</h4>
+                    <pre>{{ previous.bundle.zh }}</pre>
+                  </div>
+                  <div>
+                    <h4>V{{ selected.sequence }}</h4>
+                    <pre>{{ draftZh }}</pre>
+                  </div>
+                </div>
+              </template>
+            </section>
+          </div>
+          <section v-if="analysis" class="panel analysis-panel">
+            <div class="panel-head">
+              <h2>03 <span>质量分析与修改建议</span></h2>
+              <span class="score"
+                >{{ analysis.result.score }}<small>/100</small></span
+              >
+            </div>
+            <p>{{ analysis.result.summary }}</p>
+            <p v-if="analysisStale" class="error">
+              版本或需求已变化，请重新分析后再应用建议。
+            </p>
+            <div class="dimensions">
+              <div v-for="d in analysis.result.dimensions" :key="d.name">
+                <strong
+                  >{{ d.name }}<span>{{ d.score }}</span></strong
+                >
+                <p>{{ d.reason }}</p>
+              </div>
+            </div>
+            <div class="suggestions">
+              <article v-for="s in analysis.result.suggestions" :key="s.id">
+                <div>
+                  <h3>{{ s.title }}</h3>
+                  <p>{{ s.reason }}</p>
+                  <small>{{ s.instruction }}</small>
+                </div>
+                <button
+                  :disabled="busy || analysisStale"
+                  @click="
+                    run(
+                      mode === 'reference'
+                        ? 'reference.rewrite'
+                        : 'text.optimize',
+                      s.id,
+                    )
+                  "
+                >
+                  按此建议生成新版本
+                </button>
+              </article>
+            </div>
+          </section>
+        </template>
+        <template
+          v-else-if="
+            page === 'history' || page === 'favorites' || page === 'library'
+          "
+          ><div class="page-title">
+            <div>
+              <span class="eyebrow">YOUR CREATIVE ASSETS</span>
+              <h1>
+                {{
+                  page === "history"
+                    ? "历史与版本"
+                    : page === "favorites"
+                      ? "我的收藏"
+                      : "团队精品库"
+                }}
+              </h1>
+              <p>
+                {{
+                  page === "library"
+                    ? "经过打磨的提示词，由团队主动分享。复制到私人空间后可继续编辑。"
+                    : "每次优化都留下记录，让好结果可以继续生长。"
+                }}
+              </p>
+            </div>
+            <button :disabled="busy" @click="attempt(exportPrivateData)">
+              导出我的文字数据
+            </button>
+          </div>
+          <input
+            v-model="search"
+            class="search"
+            placeholder="搜索作品名称"
+            aria-label="搜索作品"
+          />
+          <template v-if="page !== 'library'"
+            ><h2>我的作品</h2>
+            <div class="asset-grid">
+              <article
+                v-for="w in filteredHistory"
+                :key="w.id"
+                class="panel asset"
+              >
+                <span class="tag">{{
+                  w.mode === "reference" ? "参考图" : "文字"
+                }}</span>
+                <h3>{{ w.title }}</h3>
+                <p>{{ w.source_text || "参考图提示词提炼" }}</p>
+                <div class="actions">
+                  <button class="primary" :disabled="busy" @click="openWork(w)">
+                    打开作品</button
+                  ><button :disabled="busy" @click="favorite(w)">
+                    {{ w.favorite ? "取消收藏" : "收藏" }}
+                  </button>
+                </div>
+              </article>
+            </div>
+            <p v-if="!filteredHistory.length" class="muted">
+              这里还没有作品，先提炼一张参考图吧。
+            </p></template
+          >
+          <template v-if="page !== 'history'"
+            ><h2>
+              {{ page === "favorites" ? "收藏的团队作品" : "已分享的作品" }}
+            </h2>
+            <div class="asset-grid">
+              <article
+                v-for="item in filteredLibrary"
+                :key="item.id"
+                class="panel asset"
+              >
+                <span class="tag">{{
+                  item.reference_path ? "含共享参考图" : "仅分享提示词"
+                }}</span>
+                <h3>{{ item.title }}</h3>
+                <p>{{ item.bundle.zh }}</p>
+                <div class="actions">
+                  <button
+                    class="primary"
+                    :disabled="busy"
+                    @click="importLibrary(item)"
+                  >
+                    复制到私人空间</button
+                  ><button :disabled="busy" @click="favoriteLibrary(item)">
+                    {{
+                      favoriteIds.includes(item.id) ? "取消收藏" : "收藏"
+                    }}</button
+                  ><button
+                    v-if="item.owner_id === user.id"
+                    :disabled="busy"
+                    @click="unpublish(item)"
+                  >
+                    撤回分享
+                  </button>
+                </div>
+              </article>
+            </div>
+            <p v-if="!filteredLibrary.length" class="muted">
+              暂时没有分享的作品。
+            </p></template
+          >
+        </template>
+        <template v-else-if="page === 'admin'"
+          ><div class="page-title">
+            <div>
+              <span class="eyebrow">TEAM SETTINGS</span>
+              <h1>团队管理</h1>
+              <p>邀请成员，安排公司的模型额度。密钥只在服务器后台配置。</p>
+            </div>
+          </div>
+          <div class="admin-grid">
+            <section class="panel">
+              <h2>邀请成员</h2>
+              <form @submit.prevent="invite">
+                <label
+                  >成员邮箱<input
+                    v-model="inviteEmail"
+                    type="email"
+                    required /></label
+                ><button class="primary" :disabled="busy">生成邀请链接</button>
+              </form>
+              <div v-if="inviteUrl" class="invite">
+                <p>请私下交给对应成员，链接持有人可进入该账号。</p>
+                <textarea
+                  readonly
+                  :value="inviteUrl"
+                  aria-label="邀请链接"
+                ></textarea
+                ><button @click="copyInvite">复制邀请链接</button>
+              </div>
+            </section>
+            <form
+              class="panel"
+              @submit.prevent="
+                attempt(async () => {
+                  await call('settings.update', { settings });
+                  notice = '团队额度已保存。';
+                })
+              "
+            >
+              <h2>调用额度</h2>
+              <label
+                >每人每天<input
+                  v-model.number="settings.member_daily"
+                  type="number"
+                  min="1"
+                  max="10000"
+                  required /></label
+              ><label
+                >团队每天<input
+                  v-model.number="settings.team_daily"
+                  type="number"
+                  min="1"
+                  max="100000"
+                  required /></label
+              ><label
+                >每人同时处理<input
+                  v-model.number="settings.user_concurrent"
+                  type="number"
+                  min="1"
+                  max="3"
+                  required /></label
+              ><label
+                >团队同时处理<input
+                  v-model.number="settings.team_concurrent"
+                  type="number"
+                  min="1"
+                  max="10"
+                  required /></label
+              ><button class="primary" :disabled="busy">保存额度</button>
+              <p class="hint">
+                按北京时间每日重置。每次接收的模型操作计一次，兼容回退不重复计次。
+              </p>
+            </form>
+          </div>
+          <section class="panel">
+            <h2>团队成员</h2>
+            <div v-for="m in members" :key="m.user_id" class="member-row">
+              <span
+                >{{ m.email }}
+                <small>{{
+                  m.role === "admin" ? "管理员" : m.active ? "使用中" : "已停用"
+                }}</small></span
+              ><button
+                v-if="m.role === 'member'"
+                :disabled="busy"
+                @click="updateMember(m)"
+              >
+                {{ m.active ? "停用" : "启用" }}
+              </button>
+            </div>
+          </section></template
+        >
+      </div>
+      <footer>
+        HiBREW Prompt Studio · 团队提示词资产 ·
+        <a :href="SOURCE_URL" target="_blank" rel="noopener">查看源码</a>
+      </footer>
+    </main>
+    <div v-if="publishOpen" class="modal-backdrop">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="publish-title"
+        class="modal"
+      >
+        <h2 id="publish-title">发布到团队精品库</h2>
+        <p>
+          团队成员将能查看并复制当前提示词。私人历史和分析记录不会一起分享。
+        </p>
+        <label v-if="imagePath" class="checkbox"
+          ><input
+            v-model="shareImage"
+            type="checkbox"
+          />同时分享原始参考图</label
+        >
+        <p class="hint">默认仅分享提示词。之后可以撤回分享。</p>
+        <div class="actions">
+          <button :disabled="busy" @click="publishOpen = false">取消</button
+          ><button class="primary" :disabled="busy" @click="publish">
+            确认发布
+          </button>
+        </div>
+      </section>
+    </div>
+    <div v-if="setPassword" class="modal-backdrop">
+      <form class="modal" @submit.prevent="savePassword">
+        <h2>设置你的登录密码</h2>
+        <p>之后可直接使用邮箱和密码登录。</p>
+        <label
+          >新密码<input
+            v-model="password"
+            type="password"
+            autocomplete="new-password"
+            minlength="12"
+            required
+        /></label>
+        <p v-if="error" class="error" role="alert">{{ error }}</p>
+        <button class="primary" :disabled="busy">保存密码</button>
+      </form>
+    </div>
+  </div>
+</template>

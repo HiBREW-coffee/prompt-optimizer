@@ -1,0 +1,105 @@
+# HiBREW 提示词工作室：免费团队版
+
+代码托管在 GitHub，前端使用 Cloudflare Pages Free，后台复用 Supabase Free。应用不设置试用到期日，不自动升级付费。模型调用仍消耗公司 LK888 额度。免费服务有平台用量限制；Supabase 低活跃项目可能暂停，恢复项目后即可继续使用。
+
+## 功能
+
+独立构建只包含文字优化、单张参考图提炼与受控改写，默认进入参考图提炼。输出中文、英文和 JSON；分析读取原图、当前版本、保留与修改要求，提供评分和可应用的建议。手动编辑、恢复和建议修改都追加版本，不覆盖旧记录。包含私人云端历史、收藏、导出、主动发布/撤回的团队精品库。不包含图像生成、MCP 或用户模型密钥设置。
+
+## 1. 部署前检查现有 Supabase 项目
+
+确认项目地区和剩余配额；已有应用与本应用共享 500MB 数据库、1GB 存储和免费函数额度。建议用 SQL Editor 新建查询，只运行以下只读检查，不查询任何密钥表或业务数据：
+
+```sql
+select pg_size_pretty(pg_database_size(current_database())) as database_size;
+select table_name from information_schema.tables where table_schema='public' and table_name like 'ps\_%' escape '\';
+select id,public,file_size_limit,allowed_mime_types from storage.buckets;
+select policyname,roles,cmd,permissive,qual,with_check from pg_policies where schemaname='storage' and tablename='objects';
+```
+
+若已有 `ps_*` 表或 `prompt-studio-references` 存储桶，先核对来源，不覆盖。迁移创建隔离的表、函数和私有桶。存储的 restrictive guard 防止已有 permissive 规则放开本桶，其他桶保持原有规则。不改变全项目注册、邮件或现有函数配置。
+
+在 SQL Editor 运行 `supabase/migrations/202610230001_prompt_studio.sql` 一次。迁移使用事务，失败会回滚；不要反复执行或自动删除冲突对象。
+
+## 2. 发布 Supabase 函数
+
+部署名称必须为 `prompt-studio-api`，不要替换现有 `smart-handler`。
+
+```bash
+pnpm install --frozen-lockfile --ignore-scripts
+node scripts/sync-team-templates.mjs --check
+node scripts/build-team-edge.mjs
+```
+
+可以在 Dashboard 创建新 Edge Function，把生成的 `supabase/.temp/prompt-studio-api.ts` 作为单文件源码部署。或者使用已登录的官方 CLI：
+
+```bash
+supabase functions deploy prompt-studio-api --project-ref YOUR_PROJECT_REF
+```
+
+配置文件对此新函数设置 `verify_jwt=false`，以兼容非对称 JWT；函数自身强制调用 Auth.getUser 验证会话，再验证 `ps_members`。不能去掉其中任一验证。Dashboard 部署时也须关闭此函数的旧式网关 JWT 校验；其他函数保持原配置。
+
+由项目所有者直接在 Supabase Secrets 添加以下设置，**不要把模型 Key 发到聊天、GitHub 或前端**：
+
+| 设置 | 用途 |
+| --- | --- |
+| `PS_LK888_API_KEY` | 公司 LK888 Key，只在函数内使用 |
+| `PS_LK888_MODEL` | 默认 `gem-3.8-flash`，需账户支持图片理解 |
+| `PS_APP_URL` | 最终 Cloudflare Pages HTTPS 根地址 |
+| `PS_ALLOWED_ORIGINS` | 允许的网站 origin，以英文逗号分隔；不使用通配符 |
+
+`SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 由运行平台提供，绝不复制到前端。服务器固定访问 `https://api.lk888.ai`。只在流式路由 HTTP 404/405/501 且未读取任何响应块时，保留相同输入回退一次 `generateContent`；其他失败不重试。同一次操作合计 120 秒，包括身份验证、下载图、流式及非流式回退。中断不自动重放，可按请求 ID 查询完成结果。
+
+## 3. 连接 GitHub 和 Cloudflare Pages
+
+在 Cloudflare 的 Workers & Pages 中选择 **Pages → Connect to Git**，连接 `HiBREW-coffee/prompt-optimizer`，选择分支 `feature/prompt-studio-design-templates-v1`。首版验证完成后再让团队正式使用。
+
+| 配置 | 值 |
+| --- | --- |
+| Framework | Vue / None（使用下列显式配置） |
+| Root directory | 仓库根目录 |
+| Build command | `pnpm build:team` |
+| Build output directory | `packages/web/dist-team` |
+| `NODE_VERSION` | `24` |
+| `PNPM_VERSION` | `10.6.1` |
+| `VITE_TEAM_SUPABASE_URL` | Supabase 项目公开 HTTPS URL |
+| `VITE_TEAM_SUPABASE_ANON_KEY` | Supabase **publishable / anon 公共客户端值**，必须由所有者在平台内填写 |
+
+不要填写模型 Key、`service_role` 或 `sb_secret_*`。构建会拒绝服务器密钥作为客户端配置。本构建不加载原应用的 `.env` 或其他 `VITE_*` 模型配置。首次发布得到 `pages.dev` 地址后填回 `PS_APP_URL` 和 `PS_ALLOWED_ORIGINS`；在 Supabase Auth 的 Redirect URLs 添加这个确切根地址，不改其他应用的 Site URL 或已有跳转列表。预览地址默认不能调用后台，需明确加入允许列表才可使用。
+
+Cloudflare Git 集成负责每次推送自动发布；`Prompt Studio Team` GitHub Actions 负责校验并保留独立构建产物。不能因 CI 通过而声称数据库、函数或 Pages 已发布。
+
+## 4. 首位管理员与成员邀请
+
+由所有者在 Supabase Authentication 创建/确认自己的应用账号，然后执行下面查询，仅将自己已有账号加入工作室。替换邮箱，不更改 Auth 的其他用户和密码：
+
+```sql
+insert into public.ps_members(user_id,email,role)
+select id,email,'admin' from auth.users where email='YOUR_ADMIN_EMAIL';
+```
+
+登录工作室后进入团队管理，为成员生成邀请链接，私下交给对应成员。无需免费 SMTP，也不会由系统自动群发邮件。成员设置自己的密码；已存在的 Supabase 用户也不会自动获得本应用成员资格。停用成员会撤回本应用数据访问。不要在日志、公共 PR 或导出中保存邀请链接。
+
+## 数据、额度与边界
+
+- 每人每天 50 次、团队 200 次；个人同时 1 项、团队同时 2 项。可在团队管理调整；按北京时间每日重置。已接收的失败请求也占次数，因为上游可能已经计费。回退仍为一次操作。
+- 私人作品和图像只对所属成员可见。团队库保存提示词快照，默认不共享原图或私人原始需求；只有明确勾选才授权团队读图。撤回后旧签名链接最长仍可用 60 秒。
+- 图片只接受 PNG/JPEG、10MB 以内；浏览器重编码并缩放至长边 2048px，去除元数据；服务器验证文件签名。原始高分辨率文件请保留在自己的资料库。
+- 修改建议绑定被分析版本和需求，输入变化后必须重新分析。多标签同时编辑时，后到结果保存为分支，不替换当前版本。恢复旧版本会产生新版本。
+- 导出包含本人的提示词、版本和分析，排除会话、服务配置、邀请、图片签名链接和密钥；图片文件暂不包含在导出中。应用无自动备份承诺，可定期导出并另行使用平台备份机制。
+- 新建草稿或更换图片后放弃的上传不会自动删除，管理员应关注存储用量并用 Storage 管理清理确认未引用的文件。不会为释放空间擅自删除业务记录。
+
+## 验收
+
+```bash
+pnpm typecheck:team
+pnpm test:team
+node scripts/sync-team-templates.mjs --check
+deno check --config supabase/functions/prompt-studio-api/deno.json supabase/functions/prompt-studio-api/index.ts
+pnpm build:team
+node scripts/check-team-dist.mjs
+```
+
+再用两位成员测试：另一人的作品/原图不可见；主动分享的提示词可复制；未勾选时图片不可见；撤回共享后访问恢复私有。用产品图、空间图、复杂光线图分别测试提炼、保留机位修改材质、三格式一致性、评分、建议修改和版本恢复。重新打开网页验证云端记录，并从团队实际网络测试访问。使用服务器已有配置完成模型测试，不读取或截图密钥。
+
+回滚前端使用 Cloudflare 既有部署回滚；后台可回滚函数版本。数据库新增表不自动删除，保留团队数据并停止入口即可。
