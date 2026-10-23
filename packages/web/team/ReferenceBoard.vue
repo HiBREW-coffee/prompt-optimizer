@@ -2,7 +2,7 @@
 import type { ReferenceImage } from "../../../supabase/functions/_shared/studio-contract";
 import StudioIcon from "./StudioIcon.vue";
 defineProps<{
-  images: Array<ReferenceImage & { preview: string }>;
+  images: Array<ReferenceImage & { preview: string; data?: string }>;
   busy: boolean;
   locked: boolean;
 }>();
@@ -11,6 +11,7 @@ const emit = defineEmits<{
   remove: [index: number];
   move: [index: number, direction: number];
   update: [index: number, key: "role" | "note", value: string];
+  restore: [index: number, event: Event];
 }>();
 </script>
 <template>
@@ -27,7 +28,8 @@ const emit = defineEmits<{
         :key="image.path"
       >
         <div class="reference-photo">
-          <img :src="image.preview" :alt="`图${index + 1}参考图`" /><b
+          <img v-if="image.preview" :src="image.preview" :alt="`图${index + 1}参考图`" />
+          <span v-else class="reference-missing">原图未长期保存</span><b
             >图{{ index + 1 }}</b
           ><button
             v-if="!locked"
@@ -38,6 +40,11 @@ const emit = defineEmits<{
             ×
           </button>
         </div>
+        <label v-if="image.temporary && !image.preview" class="restore-reference">
+          重新选择图{{ index + 1 }}原文件
+          <input type="file" accept="image/png,image/jpeg" :disabled="busy"
+            :aria-label="`重新选择图${index+1}原文件`" @change="emit('restore',index,$event)" />
+        </label>
         <label class="compact-label"
           >图{{ index + 1 }}用途<select
             :value="image.role"
@@ -109,10 +116,12 @@ const emit = defineEmits<{
       />
     </label>
     <p class="hint" v-if="locked">
-      参考图随历史版本保存；添加或调整图片顺序请新建作品。用途说明仍可调整。
+      {{ images.some(image => image.temporary) ? '图号、用途和文字成果已保存；原图仅供本次使用，刷新后需重新选择原文件。' : '旧参考图仍随历史版本保存；添加或调整图片顺序请新建作品。用途说明仍可调整。' }}
     </p>
     <p class="reference-help" v-else>
       例如：图1提供产品，图2提供桌面与背景，图3提供人物。拖选或逐次添加后，请在提示词里说明怎样组合。
+      新图仅供本次使用，不长期保存到工作室云端。
     </p>
   </div>
 </template>
+

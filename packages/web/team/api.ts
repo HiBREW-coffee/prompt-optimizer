@@ -64,6 +64,9 @@ const errors: Record<string, string> = {
   FORBIDDEN: "此操作仅管理员可用。",
   BUSY: "当前正在处理其他任务，请稍后再试。",
   DAILY_LIMIT: "今日调用额度已用完，请联系管理员。",
+  INVALID_MEMORY: "请填写简短、可复用的经验，或合并过多的经验卡。",
+  DUPLICATE_MEMORY: "已有相同的经验规则，请合并后保存。",
+  MEMORY_TOO_LARGE: "经验内容过多，请只保留最重要的文字规则。",
   MODEL_NOT_CONFIGURED: "管理员尚未在服务器配置模型，请稍后使用。",
   SERVER_CONFIGURATION: "服务器模型配置需要检查。",
   REQUEST_TIMEOUT: "本次处理超时。你可以稍后查询结果，或手动发起新操作。",
@@ -76,6 +79,9 @@ const errors: Record<string, string> = {
   INCOMPLETE_MODEL_OUTPUT: "模型返回被截断或拒绝，请调整要求后重试。",
   INVALID_IMAGE: "请上传 10MB 以内的 PNG 或 JPEG 图片。",
   IMAGE_REQUIRED: "请先上传参考图。",
+  REFERENCE_REUPLOAD_REQUIRED: "本次参考图未长期保存。请重新选择对应原图后再看图分析或继续优化。",
+  REFERENCE_FILE_MISMATCH: "所选文件与这张参考图不一致。请使用原文件；更换参考图请新建作品。",
+  TEMPORARY_REFERENCE_NOT_SHAREABLE: "本次参考图未存入云端，团队库可以分享文字提示词。",
   NOT_FOUND: "未找到记录，或你没有访问权限。",
   REFERENCE_LOCKED: "此作品已有版本。更换参考图请新建作品。",
   MODEL_HTTP_401: "模型身份验证失败，请管理员检查服务器配置。",
@@ -154,12 +160,13 @@ export async function signedImage(path: string): Promise<string> {
 export async function uploadImage(
   file: File,
   userId: string,
-): Promise<{ path: string; preview: string }> {
+) {
   if (
     !["image/png", "image/jpeg"].includes(file.type) ||
     file.size > 10 * 1024 * 1024
   )
     throw new Error("INVALID_IMAGE");
+  const sourceDigest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", await file.arrayBuffer())), byte => byte.toString(16).padStart(2,"0")).join("");
   const bitmap = await createImageBitmap(file);
   if (bitmap.width * bitmap.height > 40_000_000) {
     bitmap.close();
@@ -181,11 +188,14 @@ export async function uploadImage(
     ),
   );
   const path = `${userId}/${crypto.randomUUID()}.${file.type === "image/png" ? "png" : "jpg"}`;
-  const { error } = await db!.storage
-    .from(BUCKET)
-    .upload(path, image, { contentType: file.type, upsert: false });
-  if (error) throw new Error("INVALID_IMAGE");
-  return { path, preview: URL.createObjectURL(image) };
+  if (image.size > 10 * 1024 * 1024) throw new Error("INVALID_IMAGE");
+  const bytes = new Uint8Array(await image.arrayBuffer());
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), byte => byte.toString(16).padStart(2,"0")).join("");
+  let binary = "";
+  for (let index=0; index<bytes.length; index+=8192)
+    binary += String.fromCharCode(...bytes.subarray(index,index+8192));
+  return { path, preview: URL.createObjectURL(image), temporary: true as const,
+    digest, sourceDigest, data: btoa(binary), mimeType: file.type };
 }
 export function download(
   name: string,
@@ -200,17 +210,19 @@ export function download(
   URL.revokeObjectURL(url);
 }
 export async function exportPrivateData() {
-  const [workspaces, versions, analyses, inspections] = await Promise.all([
+  const [workspaces, versions, analyses, inspections, memory] = await Promise.all([
     rows<StudioWorkspace>("ps_workspaces"),
     rows<StudioVersion>("ps_versions"),
     rows<AnalysisRow>("ps_analyses"),
     rows<InspectionRow>("ps_inspections"),
+    rows("ps_memory"),
   ]);
   download(
     "prompt-studio-export.json",
     JSON.stringify(
       {
-        schemaVersion: 2,
+        schemaVersion: 3,
+        memory: memory.map(({ enabled, rules }: any) => ({ enabled, rules })),
         exportedAt: new Date().toISOString(),
         workspaces: workspaces.map(
           ({ reference_path, reference_images, ...w }) => ({
@@ -250,3 +262,4 @@ export async function exportPrivateData() {
     ),
   );
 }
+

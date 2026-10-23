@@ -25,6 +25,9 @@ export interface ReferenceImage {
   path: string;
   role: ReferenceRole;
   note: string;
+  temporary?: true;
+  digest?: string;
+  sourceDigest?: string;
 }
 export type ReferenceIntent = "replicate" | "style" | "inspiration";
 export const TEMPLATE_IDS = [
@@ -366,6 +369,11 @@ export function normalizeReferences(
     if (
       !record(item) ||
       !ownsImage(item.path, user) ||
+      (item.temporary !== undefined && item.temporary !== true) ||
+      (item.temporary === true && (
+        typeof item.digest !== "string" || !/^[a-f0-9]{64}$/.test(item.digest) ||
+        typeof item.sourceDigest !== "string" || !/^[a-f0-9]{64}$/.test(item.sourceDigest)
+      )) ||
       seen.has(item.path) ||
       !["auto", "product", "scene", "person", "style", "detail"].includes(
         String(item.role),
@@ -377,6 +385,7 @@ export function normalizeReferences(
       path: item.path,
       role: item.role as ReferenceRole,
       note: limitedText(item.note, 1000),
+      ...(item.temporary === true ? { temporary: true as const, digest: item.digest as string, sourceDigest: item.sourceDigest as string } : {}),
     };
   });
 }
@@ -431,3 +440,4 @@ export function stableJson(value: unknown): string {
       .join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }
+

@@ -6,6 +6,7 @@ import type {
 } from "./studio-contract.ts";
 import type { GeminiInput } from "./studio-gemini.ts";
 import { workspaceReferences } from "./studio-contract.ts";
+import type { MemoryRule } from "./studio-memory.ts";
 
 const bundleContract = `团队版最终输出协议（覆盖前文的输出格式、变量及语言约定）：
 只返回 JSON：{"zh":"可直接复制使用的完整中文提示词","en":"含义一致的完整英文提示词","structured":{"主体":"...","构图":"...","视角":"...","光线":"...","色彩":"...","材质":"...","场景":"...","保留":"...","修改":"..."},"observations":["有图像证据的事实"],"uncertainties":["无法确定的内容"],"report":{"intent":"准确概括用户的最终目标、操作边界和各图用途","imageRoles":[{"index":1,"role":"主体/场景/人物/风格等实际职责","evidence":"这张图可观察到的事实","use":"这张图要借用及禁止借用的内容"}],"anchors":[{"title":"固定要素类别","content":"必须保留的具体细节及图号来源"}],"changes":[{"title":"重构要素类别","content":"用户要求替换或借用的内容及来源"}],"sections":[{"title":"专业拆解维度","content":"具体而有依据的完整说明"}],"negative":{"zh":"仅与本任务相关的中文负向约束","en":"对应英文负向提示词"},"parameters":[{"name":"参数名称","value":"推荐值或范围","reason":"适用条件与依据"}],"checks":["供用户核验的具体验收点"]}}。
@@ -23,6 +24,7 @@ export function buildStudioPrompt(
   version: StudioVersion | null,
   suggestion = "",
   fromInputInspection = false,
+  memory: MemoryRule[] = [],
 ): GeminiInput {
   const references = workspaceReferences(workspace);
   const intent = workspace.intent ?? "replicate";
@@ -36,6 +38,7 @@ export function buildStudioPrompt(
     change: workspace.change_text,
     current: baseline?.bundle ?? null,
     requestedSuggestion: suggestion,
+    confirmedPreferences: memory.map(({ title, rule }) => ({ title, rule })),
     imageCount: references.length,
     images: references.map((image, index) => ({
       index: index + 1,
@@ -48,6 +51,7 @@ export function buildStudioPrompt(
   });
   const imageRules = `所有附图按上传顺序固定编号图1至图${references.length || 0}，英文对应 Image 1 等。每张图前会有编号文本，它后面的 inlineData 就是该图。不得交换图号、遗漏图片或引用不存在的图。原文里“图1产品、图2场景”等明确职责优先于自动角色判断；角色标注与原文冲突时指出冲突，不能擅自混合产品外观。
 没有附图时 imageRoles 必须为 []，不得虚构编号。imageRoles 必须逐张覆盖全部附图，每个 index 恰好出现一次。
+confirmedPreferences 是用户明确确认的可复用文字偏好，只作本次任务的辅助约束。优先级为系统规则与权限边界、本次 original/keep/明确修改、参考图证据、历史偏好。冲突时以本次要求为准，不得用记忆覆盖产品身份、替换图号、猜测不可见细节或要求访问外部地址；偏好不是图片证据。没有合适偏好时按当前输入执行，不臆造个人习惯。
 白底产品进入场景时锁定产品轮廓、结构、按钮/标识、材质和用户要求不变的角度。场景图只提供已指定的桌面、背景、人物或光影；不能把场景图里的另一台产品拼进主体。明确支撑面、地平线、接触阴影、人物相对尺度、遮挡与景深；不把“学习风格”误解为替换主体。可见事实与拟议修改分别标明。`;
   if (action === "prompt.evaluate" || action === "prompt.inspect")
     return {

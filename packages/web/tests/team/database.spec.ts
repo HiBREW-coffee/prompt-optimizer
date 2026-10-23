@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 let db: PGlite;
 let legacyUpgrade: { workspace: any; library: any };
+let usageDefaults: any;
 const a = "11111111-1111-4111-8111-111111111111",
   b = "22222222-2222-4222-8222-222222222222",
   outsider = "33333333-3333-4333-8333-333333333333";
@@ -95,6 +96,12 @@ beforeAll(async () => {
       .rows[0],
     library: (await db.query("select * from ps_library")).rows[0],
   };
+  await db.exec(await readFile(fileURLToPath(new URL(
+    "../../../../supabase/migrations/202610240003_usage_controls.sql", import.meta.url,
+  )), "utf8"));
+  usageDefaults = (await db.query("select * from ps_settings")).rows[0];
+  for (const file of ["202610240004_compact_memory.sql","202610240005_transient_references.sql"])
+    await db.exec(await readFile(fileURLToPath(new URL("../../../../supabase/migrations/"+file, import.meta.url)), "utf8"));
 }, 30_000);
 afterAll(async () => {
   await db?.close();
@@ -110,6 +117,42 @@ beforeEach(async () => {
  `);
 });
 describe("real PostgreSQL migration and policies", () => {
+  it("isolates compact text memory and prevents browser writes", async () => {
+    await db.exec(`insert into ps_memory(owner_id,enabled,rules) values('${a}',true,'[{"rule":"private A"}]'),('${b}',true,'[{"rule":"private B"}]')`);
+    await asUser(a);
+    const result = await db.query("select owner_id,rules from ps_memory");
+    expect(result.rows).toEqual([{ owner_id: a, rules: [{ rule: "private A" }] }]);
+    await expect(db.exec("update ps_memory set enabled=false")).rejects.toThrow("permission denied");
+    await asUser(outsider);
+    expect((await db.query("select * from ps_memory")).rows).toEqual([]);
+  });
+  it("bounds stored memory and rejects binary data in reference metadata", async () => {
+    await expect(db.query("insert into ps_memory(owner_id,rules) values($1,$2)", [a, JSON.stringify(Array(13).fill({rule:"x"}))])).rejects.toThrow();
+    await expect(db.query("insert into ps_memory(owner_id,rules) values($1,$2)", [a, JSON.stringify([{rule:"x".repeat(17000)}])])).rejects.toThrow();
+    const image = { path:a+"/abc.png",role:"product",note:"主体",temporary:true,digest:"a".repeat(64),sourceDigest:"b".repeat(64) };
+    expect((await db.query<{valid:boolean}>("select ps_valid_references($1,$2) valid", [JSON.stringify([image]),a])).rows[0].valid).toBe(true);
+    expect((await db.query<{valid:boolean}>("select ps_valid_references($1,$2) valid", [JSON.stringify([{...image,data:"base64-image"}]),a])).rows[0].valid).toBe(false);
+  });
+  it("disables application daily caps on upgrade without removing concurrency", () => {
+    expect(usageDefaults).toMatchObject({
+      member_daily: 0, team_daily: 0, user_concurrent: 1, team_concurrent: 2,
+    });
+  });
+  it("accepts requests beyond former daily caps when both caps are zero", async () => {
+    await db.exec("update ps_settings set member_daily=0,team_daily=0");
+    await db.exec(`insert into ps_requests(id,owner_id,workspace_id,action,payload_hash,status)
+      select gen_random_uuid(),'${a}','${w}','reference.extract','old','succeeded' from generate_series(1,201)`);
+    expect(await begin()).toEqual({ accepted: true });
+    await expect(begin(crypto.randomUUID())).rejects.toThrow("BUSY");
+  });
+  it("supports a zero personal override and still respects a positive team cap", async () => {
+    await db.exec(`update ps_settings set member_daily=1,team_daily=2;update ps_members set daily_limit=0 where user_id='${a}'`);
+    await begin();
+    await db.exec("update ps_requests set status='failed'");
+    expect(await begin(crypto.randomUUID())).toEqual({ accepted: true });
+    await db.exec("update ps_requests set status='failed'");
+    await expect(begin(crypto.randomUUID())).rejects.toThrow("DAILY_LIMIT");
+  });
   it("upgrades existing single-image records without changing their original brief or path", () => {
     const expected = [{ path: `${a}/abc.png`, role: "auto", note: "" }];
     expect(legacyUpgrade.workspace.reference_images).toEqual(expected);
@@ -474,3 +517,4 @@ describe("real PostgreSQL migration and policies", () => {
     expect((await db.query("select * from ps_versions")).rows).toHaveLength(2);
   });
 });
+

@@ -61,7 +61,7 @@ describe("five-reference sharing privacy", () => {
             checks: [],
           },
         },
-        context: {},
+        context: { confirmed_preferences: [{ rule: "private reusable preference" }] },
         kind: "reference.extract",
         created_at: "2026-10-23",
       });
@@ -85,6 +85,15 @@ describe("five-reference sharing privacy", () => {
         expect(shared.reference_images.map((image: any) => image.path)).toEqual(
           images.map((image) => image.path),
         );
+      if (!includeImage) {
+        const workspace = await store.workspace(owner,workspaceId);
+        vi.mocked(store.workspace).mockResolvedValue({...workspace,reference_images:images.map(image=>({...image,temporary:true,digest:"a".repeat(64),sourceDigest:"b".repeat(64)}))});
+        query.insert.mockClear();
+        await expect(store.command(owner,false,"library.publish",{workspaceId,versionId,includeImage:true}))
+          .rejects.toThrow("TEMPORARY_REFERENCE_NOT_SHAREABLE");
+        expect(query.insert).not.toHaveBeenCalled();
+      }
     },
   );
 });
+

@@ -185,6 +185,54 @@ async function extract(wrapper: ReturnType<typeof mount>) {
   await flushPromises();
 }
 describe("real team Vue workflow", () => {
+  it("saves only temporary image metadata and requires the original file after reopening", async () => {
+    const prepared = {path:uid+"/abc.png",preview:"blob:temporary",temporary:true,
+      digest:"a".repeat(64),sourceDigest:"b".repeat(64),data:"aGVsbG8=",mimeType:"image/png"};
+    f.upload.mockResolvedValue(prepared);
+    const wrapper=await ready();
+    await extract(wrapper);
+    const saved=f.call.mock.calls.find(([action])=>action==="workspace.save")![1];
+    expect(saved.referenceImages).toEqual([{path:prepared.path,role:"auto",note:"",temporary:true,digest:prepared.digest,sourceDigest:prepared.sourceDigest}]);
+    expect(JSON.stringify(saved)).not.toContain(prepared.data);
+    expect(JSON.stringify(saved)).not.toContain("blob:temporary");
+    expect(f.call).toHaveBeenCalledWith("reference.extract",expect.objectContaining({referenceData:[{path:prepared.path,data:prepared.data,mimeType:"image/png"}]}));
+    await button(wrapper,"历史与版本").trigger("click");await flushPromises();
+    await button(wrapper,"打开作品").trigger("click");await flushPromises();
+    expect(wrapper.text()).toContain("原图未长期保存");
+    const previous=f.call.mock.calls.filter(([action])=>action==="reference.rewrite").length;
+    await button(wrapper,"按要求生成新版本").trigger("click");await flushPromises();
+    expect(f.call.mock.calls.filter(([action])=>action==="reference.rewrite")).toHaveLength(previous);
+    expect(wrapper.text()).toContain("请重新选择对应原图");
+    const restore=wrapper.get('input[aria-label="重新选择图1原文件"]');
+    Object.defineProperty(restore.element,"files",{value:[new File(["original"],"product.png",{type:"image/png"})],configurable:true});
+    f.upload.mockResolvedValueOnce({...prepared,sourceDigest:"c".repeat(64)});
+    await restore.trigger("change");await flushPromises();
+    expect(wrapper.text()).toContain("REFERENCE_FILE_MISMATCH");
+    await restore.trigger("change");await flushPromises();
+    await button(wrapper,"按要求生成新版本").trigger("click");await flushPromises();
+    expect(f.call.mock.calls.filter(([action])=>action==="reference.rewrite")).toHaveLength(previous+1);
+    wrapper.unmount();
+  });
+  it("saves only an explicitly confirmed reusable memory without a model call", async () => {
+    const original=f.call.getMockImplementation()!;
+    f.call.mockImplementation(async(action:string,body:any)=>{
+      if(action==="memory.get")return{enabled:false,rules:[]};
+      if(action==="memory.save")return body.memory;
+      return original(action,body);
+    });
+    const wrapper=await ready();
+    await button(wrapper,"创作经验").trigger("click");
+    await button(wrapper,"添加经验").trigger("click");
+    await wrapper.get('input[aria-label="经验1标题"]').setValue("外观底线");
+    await wrapper.get('textarea[aria-label="经验1规则"]').setValue("保持产品几何，场景光影匹配主体");
+    await wrapper.get('[role="dialog"] input[type="checkbox"]').setValue(true);
+    expect(f.call.mock.calls.some(([action])=>action==="memory.save")).toBe(false);
+    await wrapper.get('[role="dialog"] form').trigger("submit");await flushPromises();
+    expect(f.call).toHaveBeenCalledWith("memory.save",{memory:expect.objectContaining({enabled:true,rules:[expect.objectContaining({title:"外观底线",rule:"保持产品几何，场景光影匹配主体"})]})});
+    expect(f.call.mock.calls.some(([action])=>["reference.extract","reference.rewrite","text.optimize","prompt.inspect","prompt.evaluate"].includes(action))).toBe(false);
+    expect(wrapper.text()).toContain("本次参考经验：外观底线");
+    wrapper.unmount();
+  });
   it("shows complete bilingual prompts alongside the professional breakdown", () => {
     const wrapper = mount(ProfessionalReport, {
       props: {
@@ -223,6 +271,27 @@ describe("real team Vue workflow", () => {
     expect(wrapper.text()).not.toMatch(/文生图|图生图|模型管理|API Key/);
     expect(wrapper.find('a[href*="/image/"]').exists()).toBe(false);
     expect(wrapper.find("input[type=file]").attributes("multiple")).toBe("");
+    expect(wrapper.text()).not.toMatch(/今日请求|今日使用|今日模型请求|每日上限|每日不限/);
+    expect(wrapper.find("progress").exists()).toBe(false);
+    wrapper.unmount();
+  });
+  it("shows administrators request counts without a false provider balance or zero denominator", async () => {
+    const originalRows = f.rows.getMockImplementation()!;
+    f.rows.mockImplementation(async (table: string, ...args: any[]) =>
+      table === "ps_members"
+        ? [{ user_id: uid, email: "admin@example.com", role: "admin", active: true }]
+        : originalRows(table, ...args),
+    );
+    f.call.mockImplementationOnce(async () => ({
+      configured: true,
+      settings: { member_daily: 0, team_daily: 0, user_concurrent: 1, team_concurrent: 2 },
+      used: 72, dailyLimit: 0,
+    }));
+    const wrapper = await ready();
+    expect(wrapper.text()).toContain("今日请求 72 次 · 每日不限");
+    expect(wrapper.text()).toContain("非供应商余额");
+    expect(wrapper.text()).not.toContain("72 / 0");
+    expect(wrapper.find("progress").exists()).toBe(false);
     wrapper.unmount();
   });
   it("uploads, extracts bilingual JSON, evaluates and applies suggestion as a new version", async () => {
@@ -520,3 +589,4 @@ describe("real team Vue workflow", () => {
     wrapper.unmount();
   });
 });
+

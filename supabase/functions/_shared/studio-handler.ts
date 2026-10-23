@@ -23,6 +23,8 @@ import type {
 } from "./studio-contract.ts";
 import { buildStudioPrompt } from "./studio-prompts.ts";
 import type { GeminiInput } from "./studio-gemini.ts";
+import type { MemoryRule } from "./studio-memory.ts";
+import { inlineReferences } from "./studio-inline-images.ts";
 
 export interface StudioStore {
   user(token: string): Promise<{ id: string }>;
@@ -40,6 +42,7 @@ export interface StudioStore {
     request?: { status: string; result?: unknown; error_code?: string };
   }>;
   image(path: string): Promise<Uint8Array>;
+  memory?(user: string, workspace: StudioWorkspace): Promise<MemoryRule[]>;
   suggestion(
     user: string,
     analysisId: string,
@@ -55,6 +58,7 @@ export interface StudioStore {
     bundle: unknown,
     kind: string,
     request?: string,
+    context?: Record<string, unknown>,
   ): Promise<unknown>;
   analyze(
     user: string,
@@ -127,7 +131,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
       userId = user.id;
       const member = await store.member(user.id);
       if (!member?.active) throw new StudioError("NOT_MEMBER", 403);
-      const text = await readBody(request, 200_000);
+      const text = await readBody(request, Math.ceil(MAX_TOTAL_IMAGE_BYTES * 4 / 3) + 200_000);
       let body: Record<string, unknown>;
       try {
         const parsed: unknown = JSON.parse(text);
@@ -137,7 +141,10 @@ export function createStudioHandler(deps: HandlerDependencies) {
         throw new StudioError("INVALID_REQUEST");
       }
       const action = limitedText(body.action, 50);
+      if (new TextEncoder().encode(JSON.stringify({ ...body, referenceData: undefined })).length > 200_000)
+        throw new StudioError("REQUEST_TOO_LARGE", 413);
       if (!AI_ACTIONS.includes(action as AiAction)) {
+        if (body.referenceData !== undefined) throw new StudioError("INVALID_REQUEST");
         const data = await store.command(
           user.id,
           member.role === "admin",
@@ -167,6 +174,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
         workspaceReferences(workspace),
         user.id,
       );
+      const temporaryImages = await inlineReferences(body.referenceData, references);
       if (workspace.mode === "reference" && references.length === 0)
         throw new StudioError("IMAGE_REQUIRED");
       if (workspace.mode === "reference")
@@ -178,7 +186,11 @@ export function createStudioHandler(deps: HandlerDependencies) {
           ].join("\n"),
           references.length,
         );
-      const context = workspaceContext(workspace);
+      const memory = await store.memory?.(user.id, workspace) ?? [];
+      const context = {
+        ...workspaceContext(workspace),
+        ...(memory.length ? { confirmed_preferences: memory } : {}),
+      };
       let suggestion = "";
       if (body.analysisId) {
         if (!version) throw new StudioError("VERSION_REQUIRED");
@@ -211,6 +223,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
             version: version?.id,
             context,
             suggestion,
+            memory,
           }),
         ),
       );
@@ -244,11 +257,19 @@ export function createStudioHandler(deps: HandlerDependencies) {
         version,
         suggestion,
         Boolean(body.inspectionId),
+        memory,
       );
       if (workspace.mode === "reference") {
         let totalBytes = 0;
         input.images = [];
         for (const [index, reference] of references.entries()) {
+          if (reference.temporary) {
+            const image = temporaryImages.get(reference.path)!;
+            totalBytes += Math.floor(image.data.length * 3 / 4) - (image.data.endsWith("==") ? 2 : image.data.endsWith("=") ? 1 : 0);
+            if (totalBytes > MAX_TOTAL_IMAGE_BYTES) throw new StudioError("IMAGES_TOO_LARGE");
+            input.images.push({ data: image.data, mimeType: image.mimeType, index: index + 1 });
+            continue;
+          }
           const bytes = await store.image(reference.path);
           totalBytes += bytes.length;
           if (totalBytes > MAX_TOTAL_IMAGE_BYTES)
@@ -334,6 +355,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
                 bundle!,
                 action,
                 id,
+                ...(memory.length ? [context] : []),
               );
       return new Response(JSON.stringify(result), { headers });
     } catch (error) {

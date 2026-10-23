@@ -14,6 +14,8 @@ import {
 } from "./studio-contract.ts";
 import type { StudioVersion, StudioWorkspace } from "./studio-contract.ts";
 import type { StudioStore } from "./studio-handler.ts";
+import { applicableMemory, normalizeMemory } from "./studio-memory.ts";
+import type { StudioMemory } from "./studio-memory.ts";
 
 const BUCKET = "prompt-studio-references";
 function check(error: { message?: string } | null): void {
@@ -37,6 +39,15 @@ export class SupabaseStudioStore implements StudioStore {
     private appUrl: string,
     private configured: boolean,
   ) {}
+  async readMemory(user: string): Promise<StudioMemory> {
+    const { data, error } = await this.db.from("ps_memory")
+      .select("enabled,rules").eq("owner_id", user).maybeSingle();
+    check(error);
+    return data ? normalizeMemory(data) : { enabled: false, rules: [] };
+  }
+  async memory(user: string, workspace: StudioWorkspace) {
+    return applicableMemory(await this.readMemory(user), workspace.mode, workspace.template_id ?? "ecommerce");
+  }
   async user(token: string) {
     const { data, error } = await this.db.auth.getUser(token);
     if (error || !data.user) throw new StudioError("UNAUTHENTICATED", 401);
@@ -131,13 +142,14 @@ export class SupabaseStudioStore implements StudioStore {
     bundle: unknown,
     kind: string,
     request?: string,
+    context?: Record<string, unknown>,
   ) {
     const { data, error } = await this.db.rpc("ps_append_version", {
       p_user: user,
       p_workspace: workspace.id,
       p_parent: parent,
       p_bundle: bundle,
-      p_context: workspaceContext(workspace),
+      p_context: context ?? workspaceContext(workspace),
       p_kind: kind,
       p_request: request ?? null,
     });
@@ -198,7 +210,24 @@ export class SupabaseStudioStore implements StudioStore {
     action: string,
     body: Record<string, unknown>,
   ): Promise<unknown> {
+    if (action === "memory.get") return this.readMemory(user);
+    if (action === "memory.save") {
+      const memory = normalizeMemory(body.memory);
+      const { error } = await this.db.from("ps_memory").upsert({
+        owner_id: user, ...memory, updated_at: new Date().toISOString(),
+      }, { onConflict: "owner_id" });
+      check(error);
+      return memory;
+    }
     if (action === "status") {
+      // Members need service availability, not a synthetic provider-balance meter.
+      if (!admin)
+        return {
+          configured: this.configured,
+          settings: { member_daily: 0, team_daily: 0, user_concurrent: 1, team_concurrent: 2 },
+          used: 0,
+          dailyLimit: 0,
+        };
       const day =
         new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 10) +
         "T00:00:00+08:00";
@@ -262,9 +291,9 @@ export class SupabaseStudioStore implements StudioStore {
         const w = await this.workspace(user, requireId(body.workspaceId));
         if (
           w.mode !== mode ||
-          (w.current_version_id &&
-            stableJson(workspaceReferences(w).map((image) => image.path)) !==
-              stableJson(references.map((image) => image.path)))
+          (w.current_version_id && workspaceReferences(w).length > 0 &&
+            stableJson(workspaceReferences(w).map((image) => [image.path, image.sourceDigest ?? ""])) !==
+              stableJson(references.map((image) => [image.path, image.sourceDigest ?? ""])))
         )
           throw new StudioError("REFERENCE_LOCKED", 409);
         const { data, error } = await this.db
@@ -337,6 +366,8 @@ export class SupabaseStudioStore implements StudioStore {
       const w = await this.workspace(user, requireId(body.workspaceId));
       const v = await this.version(w.id, requireId(body.versionId));
       const includeImage = body.includeImage === true;
+      if (includeImage && workspaceReferences(w).some(image => image.temporary))
+        throw new StudioError("TEMPORARY_REFERENCE_NOT_SHAREABLE");
       const { data, error } = await this.db
         .from("ps_library")
         .insert({
@@ -521,7 +552,7 @@ export class SupabaseStudioStore implements StudioStore {
         typeof body.active !== "boolean" ||
         (body.dailyLimit !== null &&
           (!Number.isInteger(body.dailyLimit) ||
-            Number(body.dailyLimit) < 1 ||
+            Number(body.dailyLimit) < 0 ||
             Number(body.dailyLimit) > 10000))
       )
         throw new StudioError("INVALID_REQUEST");
@@ -544,7 +575,7 @@ export class SupabaseStudioStore implements StudioStore {
       ] as const) {
         if (
           !Number.isInteger(s[key]) ||
-          Number(s[key]) < 1 ||
+          Number(s[key]) < (key === "member_daily" || key === "team_daily" ? 0 : 1) ||
           Number(s[key]) > max
         )
           throw new StudioError("INVALID_REQUEST");
@@ -570,3 +601,4 @@ function memberPassword(value: unknown): string {
     throw new StudioError("INVALID_PASSWORD");
   return value;
 }
+

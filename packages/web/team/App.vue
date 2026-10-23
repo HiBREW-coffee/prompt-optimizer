@@ -4,6 +4,9 @@ import ReferenceBoard from "./ReferenceBoard.vue";
 import ProfessionalReportView from "./ProfessionalReport.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
 import StudioIcon from "./StudioIcon.vue";
+import MemoryPanel from "./MemoryPanel.vue";
+import { applicableMemory } from "../../../supabase/functions/_shared/studio-memory";
+import type { StudioMemory } from "../../../supabase/functions/_shared/studio-memory";
 import {
   STUDIO_TEMPLATES,
   STUDIO_INSPIRATIONS,
@@ -12,6 +15,7 @@ import {
   workspaceReferences,
   workspaceContext,
   stableJson,
+  normalizeReferences,
 } from "../../../supabase/functions/_shared/studio-contract";
 import type {
   ReferenceImage,
@@ -42,6 +46,8 @@ import type {
 } from "./api";
 import { normalizeBundle } from "../../../supabase/functions/_shared/studio-contract";
 const AVATAR_URL = "/dongwu-avatar.png";
+const memoryOpen = ref(false);
+const memoryState = ref<StudioMemory>({ enabled: false, rules: [] });
 
 type Page =
   | "reference"
@@ -71,12 +77,13 @@ const title = ref(""),
   source = ref(""),
   keep = ref(""),
   change = ref(""),
-  images = ref<Array<ReferenceImage & { preview: string }>>([]),
+  images = ref<Array<ReferenceImage & { preview: string; data?: string; mimeType?: string }>>([]),
   intent = ref<ReferenceIntent>("replicate"),
   templateId = ref("ecommerce"),
   inspirationOpen = ref(false),
   inspection = ref<InspectionRow | null>(null);
 const imagePath = computed(() => images.value[0]?.path ?? null);
+const referencesLocked = computed(() => !!selected.value && !!workspace.value && workspaceReferences(workspace.value).length > 0);
 const workspace = ref<StudioWorkspace | null>(null),
   versions = ref<StudioVersion[]>([]),
   selected = ref<StudioVersion | null>(null);
@@ -90,13 +97,13 @@ const workspaces = ref<StudioWorkspace[]>([]),
   favoriteIds = ref<string[]>([]),
   members = ref<Member[]>([]);
 const settings = ref({
-    member_daily: 50,
-    team_daily: 200,
+    member_daily: 0,
+    team_daily: 0,
     user_concurrent: 1,
     team_concurrent: 2,
   }),
   used = ref(0),
-  dailyLimit = ref(50),
+  dailyLimit = ref(0),
   configured = ref(true);
 const search = ref(""),
   compareId = ref(""),
@@ -115,6 +122,14 @@ const mode = computed<StudioMode>(() =>
 const isEditor = computed(
   () => page.value === "reference" || page.value === "text",
 );
+const activeMemory = computed(() => applicableMemory(memoryState.value, mode.value, templateId.value));
+async function saveMemory(memory: StudioMemory) {
+  await attempt(async () => {
+    memoryState.value = await call<StudioMemory>("memory.save", { memory });
+    memoryOpen.value = false;
+    notice.value = "创作经验已保存，仅用于你自己的后续创作。";
+  });
+}
 const dirty = computed(
   () =>
     !!selected.value &&
@@ -124,7 +139,7 @@ const dirty = computed(
         JSON.stringify(selected.value.bundle.structured, null, 2)),
 );
 function editorContext() {
-  return workspaceContext({
+  return { ...workspaceContext({
     id: workspace.value?.id ?? "",
     owner_id: user.value?.id ?? "",
     title: title.value,
@@ -133,16 +148,15 @@ function editorContext() {
     keep_text: keep.value,
     change_text: "",
     reference_path: imagePath.value,
-    reference_images: images.value.map(({ path, role, note }) => ({
-      path,
-      role,
-      note,
-    })),
+    reference_images: referenceMetadata(),
     intent: intent.value,
     template_id: templateId.value,
     current_version_id: workspace.value?.current_version_id ?? null,
     favorite: false,
-  });
+  }), ...(activeMemory.value.length ? { confirmed_preferences: activeMemory.value } : {}) };
+}
+function referenceMetadata() {
+  return normalizeReferences(images.value, user.value?.id ?? "");
 }
 const analysisStale = computed(
   () =>
@@ -237,6 +251,8 @@ async function logout() {
   if (busy.value || !mayLeaveEditor()) return;
   await db!.auth.signOut();
   member.value = null;
+  memoryState.value = { enabled: false, rules: [] };
+  memoryOpen.value = false;
   user.value = null;
   resetEditor();
   workspaces.value = [];
@@ -265,6 +281,8 @@ async function loadMember() {
     used.value = status.used;
     dailyLimit.value = status.dailyLimit;
     configured.value = status.configured;
+    const savedMemory = await call<StudioMemory>("memory.get");
+    memoryState.value = { enabled: savedMemory.enabled === true, rules: savedMemory.rules ?? [] };
     pendingId.value = localStorage.getItem(`ps-pending-${user.value.id}`) || "";
     await loadLists();
   } catch (e) {
@@ -343,18 +361,18 @@ async function loadReferences(w: StudioWorkspace) {
   const result = await Promise.all(
     workspaceReferences(w).map(async (image) => ({
       ...image,
-      preview: await signedImage(image.path),
+      preview: image.temporary ? "" : await signedImage(image.path),
     })),
   );
   if (user.value?.id === owner) images.value = result;
 }
 function removeImage(index: number) {
-  if (busy.value || selected.value) return;
+  if (busy.value || referencesLocked.value) return;
   const [image] = images.value.splice(index, 1);
   if (image?.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
 }
 function moveImage(index: number, direction: number) {
-  if (busy.value || selected.value) return;
+  if (busy.value || referencesLocked.value) return;
   const next = index + direction;
   if (next < 0 || next >= images.value.length) return;
   const [image] = images.value.splice(index, 1);
@@ -372,7 +390,7 @@ async function chooseImage(event: Event) {
   const files = Array.from(input.files ?? []);
   await attempt(async () => {
     if (!files.length) return;
-    if (selected.value) throw new Error("REFERENCE_LOCKED");
+    if (referencesLocked.value) throw new Error("REFERENCE_LOCKED");
     if (images.value.length + files.length > 5)
       throw new Error("INVALID_REFERENCE_IMAGES");
     if (
@@ -385,9 +403,31 @@ async function chooseImage(event: Event) {
       throw new Error("INVALID_IMAGE");
     for (const file of files) {
       const result = await uploadImage(file, user.value!.id);
+      const bytes = (value: string) => Math.floor(value.length * 3 / 4) - (value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0);
+      if (bytes(result.data ?? "") + images.value.reduce((sum,image) => sum + bytes(image.data ?? ""),0) > 20 * 1024 * 1024) {
+        URL.revokeObjectURL(result.preview);
+        throw new Error("IMAGES_TOO_LARGE");
+      }
       images.value.push({ ...result, role: "auto", note: "" });
     }
-    notice.value = "参考图已存入私人空间，图号按当前顺序对应。";
+    notice.value = "参考图仅供本次页面使用，不存入工作室云端；刷新后需重新选择原图。图号按当前顺序对应。";
+  });
+  input.value = "";
+}
+async function restoreImage(index: number, event: Event) {
+  const input = event.target as HTMLInputElement, file = input.files?.[0];
+  if (!file) return;
+  await attempt(async () => {
+    const image = images.value[index];
+    if (!image?.temporary) throw new Error("INVALID_IMAGE");
+    const prepared = await uploadImage(file, user.value!.id);
+    if (prepared.sourceDigest !== image.sourceDigest) {
+      URL.revokeObjectURL(prepared.preview);
+      throw new Error("REFERENCE_FILE_MISMATCH");
+    }
+    images.value[index] = { ...image, data: prepared.data, mimeType: prepared.mimeType,
+      digest: prepared.digest, preview: prepared.preview };
+    notice.value = "原图已重新载入本次页面，不会长期保存。";
   });
   input.value = "";
 }
@@ -419,6 +459,7 @@ async function loadInspection() {
   if (workspace.value?.id === id) inspection.value = found[0] ?? null;
 }
 async function refreshUsage() {
+  if (member.value?.role !== "admin") return;
   try {
     const status = await call<{ used: number; dailyLimit: number }>("status");
     used.value = status.used;
@@ -436,7 +477,7 @@ async function saveWorkspace() {
     referencePath: imagePath.value,
     referenceImages:
       mode.value === "reference"
-        ? images.value.map(({ path, role, note }) => ({ path, role, note }))
+        ? referenceMetadata()
         : [],
     intent: intent.value,
     templateId: templateId.value,
@@ -561,6 +602,10 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
       error.value = "请先上传参考图。";
       return;
     }
+    if (mode.value === "reference" && images.value.some(image => image.temporary && !image.data)) {
+      error.value = "本次参考图未长期保存，请重新选择对应原图后再看图分析或继续优化。";
+      return;
+    }
     if (mode.value === "text" && !source.value.trim()) {
       error.value = "请先输入需要优化的文字。";
       return;
@@ -588,6 +633,9 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
         workspaceId: workspace.value!.id,
         versionId: action === "prompt.inspect" ? undefined : selected.value?.id,
         requestId: id,
+        ...(mode.value === "reference" && images.value.some(image => image.temporary)
+          ? { referenceData: images.value.filter(image => image.temporary).map(({path,data,mimeType}) => ({path,data,mimeType})) }
+          : {}),
         ...(suggestionId
           ? {
               [fromInput ? "inspectionId" : "analysisId"]: analysisId,
@@ -896,6 +944,8 @@ watch(
   () => {
     resetEditor();
     workspaces.value = [];
+    memoryState.value = { enabled: false, rules: [] };
+    memoryOpen.value = false;
     library.value = [];
     members.value = [];
     inviteUrl.value = "";
@@ -1031,6 +1081,8 @@ onBeforeUnmount(() => {
           @click="navigate('library')"
         >
           <StudioIcon name="grid" />团队精品库</button
+        ><button :disabled="busy" @click="memoryOpen = true">
+          <StudioIcon name="spark" />创作经验</button
         ><button
           v-if="member.role === 'admin'"
           :class="{ active: page === 'admin' }"
@@ -1041,9 +1093,11 @@ onBeforeUnmount(() => {
       </nav>
       <div class="sidebar-bottom">
         <p>私人保存 · 按需分享</p>
-        <small>今日调用 {{ used }} / {{ dailyLimit }}</small
-        ><progress :value="used" :max="dailyLimit"></progress
-        ><a :href="SOURCE_URL" target="_blank" rel="noopener"
+        <template v-if="member?.role === 'admin'">
+          <small>今日请求 {{ used }} 次{{ dailyLimit > 0 ? ` / ${dailyLimit}` : ' · 每日不限' }}</small>
+          <progress v-if="dailyLimit > 0" :value="used" :max="dailyLimit"></progress>
+        </template>
+        <a :href="SOURCE_URL" target="_blank" rel="noopener"
           >开源代码 · AGPL-3.0</a
         >
       </div>
@@ -1160,12 +1214,15 @@ onBeforeUnmount(() => {
                 </p>
               </div>
             </article>
-            <article>
-              <span>今日使用</span
-              ><strong
-                >{{ used }}<small> / {{ dailyLimit }}</small></strong
-              >
-              <p>团队共享模型 · 私人保存</p>
+            <article v-if="member?.role === 'admin'">
+              <span>今日模型请求</span>
+              <strong>{{ used }}<small> 次</small></strong>
+              <p>{{ dailyLimit > 0 ? `本站每日上限 ${dailyLimit} 次` : '每日不限 · 非供应商余额' }}</p>
+            </article>
+            <article v-else>
+              <span>创作流程</span>
+              <strong>分析 · 提炼</strong>
+              <p>按建议继续优化，保留每次成果</p>
             </article>
             <article>
               <span>我的创作资产</span
@@ -1195,11 +1252,12 @@ onBeforeUnmount(() => {
                 v-if="mode === 'reference'"
                 :images="images"
                 :busy="busy"
-                :locked="!!selected"
+                :locked="referencesLocked"
                 @change="chooseImage"
                 @remove="removeImage"
                 @move="moveImage"
                 @update="updateImage"
+                @restore="restoreImage"
               />
               <div class="prompt-heading">
                 <span>提示词</span>
@@ -1278,6 +1336,9 @@ onBeforeUnmount(() => {
                   STUDIO_TEMPLATES.find((item) => item.id === templateId)
                     ?.description
                 }}
+              </p>
+              <p v-if="activeMemory.length" class="hint">
+                本次参考经验：{{ activeMemory.map(item => item.title).join('、') }}。本次明确要求优先。
               </p>
               <div class="input-actions">
                 <button
@@ -1455,6 +1516,7 @@ onBeforeUnmount(() => {
                     "
                   >
                     发布到团队库</button
+                  ><button :disabled="busy" @click="memoryOpen = true">记录创作经验</button
                   ><button
                     :disabled="busy"
                     @click="
@@ -1667,7 +1729,7 @@ onBeforeUnmount(() => {
             <div>
               <span class="eyebrow">TEAM SETTINGS</span>
               <h1>团队管理</h1>
-              <p>添加成员、设置登录密码，安排公司的模型额度。</p>
+              <p>添加成员、设置登录密码，查看本站请求与任务设置。</p>
             </div>
           </div>
           <div class="admin-grid">
@@ -1724,23 +1786,24 @@ onBeforeUnmount(() => {
               @submit.prevent="
                 attempt(async () => {
                   await call('settings.update', { settings });
-                  notice = '团队额度已保存。';
+                  notice = '使用设置已保存。';
+                  await refreshUsage();
                 })
               "
             >
-              <h2>调用额度</h2>
+              <h2>请求统计与可选上限</h2>
               <label
-                >每人每天<input
+                >每人每天（0 为不限）<input
                   v-model.number="settings.member_daily"
                   type="number"
-                  min="1"
+                  min="0"
                   max="10000"
                   required /></label
               ><label
-                >团队每天<input
+                >团队每天（0 为不限）<input
                   v-model.number="settings.team_daily"
                   type="number"
-                  min="1"
+                  min="0"
                   max="100000"
                   required /></label
               ><label
@@ -1757,9 +1820,9 @@ onBeforeUnmount(() => {
                   min="1"
                   max="10"
                   required /></label
-              ><button class="primary" :disabled="busy">保存额度</button>
+              ><button class="primary" :disabled="busy">保存使用设置</button>
               <p class="hint">
-                按北京时间每日重置。每次接收的模型操作计一次，兼容回退不重复计次。
+                默认不设每日次数上限。这里统计本站接收的模型请求（含失败），不查询供应商余额或算力；兼容回退不重复计次。并发设置只防止瞬间拥堵。
               </p>
             </form>
           </div>
@@ -1838,6 +1901,9 @@ onBeforeUnmount(() => {
         </div>
       </section>
     </div>
+    <div v-if="memoryOpen" class="modal-backdrop">
+      <MemoryPanel :value="memoryState" :busy="busy" @save="saveMemory" @close="memoryOpen = false" />
+    </div>
     <div v-if="publishOpen" class="modal-backdrop">
       <section
         role="dialog"
@@ -1849,13 +1915,14 @@ onBeforeUnmount(() => {
         <p>
           团队成员将能查看并复制当前提示词。私人历史和分析记录不会一起分享。
         </p>
-        <label v-if="imagePath" class="checkbox"
+        <label v-if="imagePath && !images.some(image => image.temporary)" class="checkbox"
           ><input
             v-model="shareImage"
             type="checkbox"
           />同时分享原始参考图</label
         >
         <p class="hint">默认仅分享提示词。之后可以撤回分享。</p>
+        <p v-if="images.some(image => image.temporary)" class="hint">本次参考图不存入云端，团队库只分享文字成果。</p>
         <div class="actions">
           <button :disabled="busy" @click="publishOpen = false">取消</button
           ><button class="primary" :disabled="busy" @click="publish">
@@ -1929,3 +1996,4 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
+

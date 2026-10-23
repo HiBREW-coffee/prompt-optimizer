@@ -129,6 +129,52 @@ function harness(overrides: Partial<StudioStore> = {}) {
   return { store, fetcher, generate, handler, request };
 }
 describe("authenticated team AI chain", () => {
+  it("sends five temporary references through the LK888 fallback without storing or downloading images", async () => {
+    const images = await Promise.all(Array.from({length:5},async(_,index)=>{
+      const bytes = new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,index]);
+      const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),b=>b.toString(16).padStart(2,"0")).join("");
+      return {path:`${uid}/${index+1}.png`,role:"product",note:"图"+(index+1),temporary:true,digest,sourceDigest:digest,
+        data:btoa(String.fromCharCode(...bytes)),mimeType:"image/png"};
+    }));
+    const references = images.map(({data,mimeType,...metadata})=>metadata);
+    const w = {...workspace,reference_path:references[0].path,reference_images:references};
+    const h = harness({workspace:vi.fn().mockResolvedValue(w)});
+    h.fetcher.mockReset().mockResolvedValueOnce(new Response("",{status:404}))
+      .mockResolvedValueOnce(Response.json({candidates:[{content:{parts:[{text:JSON.stringify({
+        ...bundle,report:{...bundle.report,imageRoles:references.map((_,index)=>({index:index+1,role:"产品",evidence:"可见主体",use:"保留"}))}
+      })}]},finishReason:"STOP"}]}));
+    const response = await h.request({action:"reference.extract",workspaceId:wid,requestId:rid,
+      referenceData:images.map(({path,data,mimeType})=>({path,data,mimeType}))});
+    expect(response.status).toBe(200);
+    expect(h.fetcher).toHaveBeenCalledTimes(2);
+    expect(h.store.image).not.toHaveBeenCalled();
+    const first = JSON.parse(String(h.fetcher.mock.calls[0][1]?.body));
+    const fallback = JSON.parse(String(h.fetcher.mock.calls[1][1]?.body));
+    expect(fallback.contents).toEqual(first.contents);
+    expect(first.contents[0].parts.filter((part:any)=>part.inlineData).map((part:any)=>part.inlineData.data)).toEqual(images.map(image=>image.data));
+    expect(h.store.save).toHaveBeenCalledTimes(1);
+    for (const image of images) expect(JSON.stringify(h.store.save.mock.calls)).not.toContain(image.data);
+  });
+  it.each(["missing","wrong-file","foreign-slot"])("rejects temporary image %s before admission or generation",async(kind)=>{
+    const bytes=new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,0]);
+    const digest=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),b=>b.toString(16).padStart(2,"0")).join("");
+    const reference={path:workspace.reference_path,role:"product",note:"",temporary:true,digest,sourceDigest:digest};
+    const h=harness({workspace:vi.fn().mockResolvedValue({...workspace,reference_images:[reference]})});
+    const response=await h.request({action:"reference.extract",workspaceId:wid,requestId:rid,
+      ...(kind==="missing"?{}:{referenceData:[{path:kind==="foreign-slot"?uid+"/def.png":reference.path,
+        mimeType:"image/png",data:btoa(String.fromCharCode(...(kind==="wrong-file"?new Uint8Array([...bytes,1]):bytes)))}]})});
+    expect(response.status).toBe(400);
+    expect(h.store.begin).not.toHaveBeenCalled();
+    expect(h.generate).not.toHaveBeenCalled();
+  });
+  it("binds confirmed memory to analysis context and version saving",async()=>{
+    const memory=[{id:rid,title:"外观底线",rule:"不改产品几何",scope:"reference" as const,template:""}];
+    const h=harness({memory:vi.fn().mockResolvedValue(memory)});
+    expect((await h.request({action:"reference.rewrite",workspaceId:wid,versionId:vid,requestId:rid})).status).toBe(200);
+    expect(JSON.parse(h.generate.mock.calls[0][0].text).confirmedPreferences).toEqual([{title:"外观底线",rule:"不改产品几何"}]);
+    expect(h.store.save).toHaveBeenCalledWith(uid,workspace,vid,expect.any(Object),"reference.rewrite",rid,
+      expect.objectContaining({confirmed_preferences:memory}));
+  });
   it.each(["prompt.inspect", "prompt.evaluate"])(
     "rejects ambiguous scoring from %s without persisting it or retrying",
     async (action) => {
