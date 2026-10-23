@@ -363,6 +363,61 @@ export class SupabaseStudioStore implements StudioStore {
       };
     }
     if (!admin) throw new StudioError("FORBIDDEN", 403);
+    if (action === "member.create") {
+      const email = limitedText(body.email, 254).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+        throw new StudioError("INVALID_EMAIL");
+      const password = memberPassword(body.password);
+      // Never change an existing shared Auth account when adding a studio member.
+      const created = await this.db.auth.admin.createUser({
+        email,
+        password,
+        email_confirm: true,
+        app_metadata: { prompt_studio_managed: true },
+      });
+      if (created.error || !created.data.user)
+        throw new StudioError(
+          ["email_exists", "user_already_exists"].includes(
+            created.error?.code ?? "",
+          )
+            ? "MEMBER_EXISTS"
+            : "MEMBER_CREATE_FAILED",
+          400,
+        );
+      const { error } = await this.db.from("ps_members").insert({
+        user_id: created.data.user.id,
+        email,
+        role: "member",
+        active: true,
+      });
+      // An interrupted provision can be completed through the existing invitation flow.
+      check(error);
+      return { ok: true };
+    }
+    if (action === "member.password") {
+      const target = requireId(body.userId);
+      if (target === user) throw new StudioError("CANNOT_EDIT_SELF");
+      const password = memberPassword(body.password);
+      const member = await this.db
+        .from("ps_members")
+        .select("role")
+        .eq("user_id", target)
+        .maybeSingle();
+      check(member.error);
+      if (member.data?.role !== "member")
+        throw new StudioError("FORBIDDEN", 403);
+      const account = await this.db.auth.admin.getUserById(target);
+      if (
+        account.error ||
+        account.data.user?.app_metadata?.prompt_studio_managed !== true
+      )
+        throw new StudioError("SHARED_ACCOUNT_PASSWORD", 403);
+      const updated = await this.db.auth.admin.updateUserById(target, {
+        password,
+      });
+      if (updated.error) throw new StudioError("PASSWORD_UPDATE_FAILED", 400);
+      return { ok: true };
+    }
     if (action === "member.invite") {
       const email = limitedText(body.email, 254).toLowerCase();
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
@@ -384,17 +439,15 @@ export class SupabaseStudioStore implements StudioStore {
         !invitation.data.properties
       )
         throw new StudioError("INVITE_FAILED", 400);
-      const { error } = await this.db
-        .from("ps_members")
-        .upsert(
-          {
-            user_id: invitation.data.user.id,
-            email,
-            role: "member",
-            active: true,
-          },
-          { onConflict: "user_id", ignoreDuplicates: true },
-        );
+      const { error } = await this.db.from("ps_members").upsert(
+        {
+          user_id: invitation.data.user.id,
+          email,
+          role: "member",
+          active: true,
+        },
+        { onConflict: "user_id", ignoreDuplicates: true },
+      );
       check(error);
       // Only the authenticated admin receives this link; it is never logged or saved in app records.
       return { inviteUrl: invitation.data.properties.action_link };
@@ -448,4 +501,10 @@ export class SupabaseStudioStore implements StudioStore {
     }
     throw new StudioError("INVALID_ACTION");
   }
+}
+
+function memberPassword(value: unknown): string {
+  if (typeof value !== "string" || value.length < 12 || value.length > 128)
+    throw new StudioError("INVALID_PASSWORD");
+  return value;
 }

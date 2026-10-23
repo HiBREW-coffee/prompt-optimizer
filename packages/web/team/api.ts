@@ -65,6 +65,13 @@ const errors: Record<string, string> = {
   MODEL_HTTP_429: "模型服务繁忙或额度不足，请稍后重试。",
   ORIGIN_DENIED: "当前网站地址尚未加入后台允许列表，请管理员检查部署配置。",
   INVITE_FAILED: "邀请未生成，请检查账号状态或稍后重试。",
+  INVALID_EMAIL: "请填写有效的成员邮箱。",
+  INVALID_PASSWORD: "密码需要 12 至 128 位。",
+  MEMBER_EXISTS:
+    "这个邮箱已有账号。请通过下方邀请链接将其加入工作室，已有密码不会被修改。",
+  MEMBER_CREATE_FAILED: "成员未创建，请检查邮箱和密码要求后重试。",
+  PASSWORD_UPDATE_FAILED: "密码未修改，请检查密码要求后重试。",
+  SHARED_ACCOUNT_PASSWORD: "此账号也用于其他应用。请让成员登录后自行修改密码。",
 };
 export function message(error: unknown): string {
   if (error instanceof Error && errors[error.message])
@@ -105,7 +112,10 @@ export async function rows<T>(
   while (result.length < max) {
     let query = db.from(table).select("*", { count: "exact" });
     if (configure) query = configure(query);
-    const { data, error, count } = await query.range(result.length, Math.min(result.length + 249, max - 1));
+    const { data, error, count } = await query.range(
+      result.length,
+      Math.min(result.length + 249, max - 1),
+    );
     if (error) throw new Error("DATABASE_ERROR");
     if (!data?.length) break;
     result.push(...data);

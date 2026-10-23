@@ -298,4 +298,47 @@ describe("real team Vue workflow", () => {
     expect(wrapper.text()).not.toContain("注册账号");
     wrapper.unmount();
   });
+  it("lets an administrator create a member without keeping the entered password", async () => {
+    const previousRows = f.rows.getMockImplementation()!;
+    f.rows.mockImplementation(async (table, configure) =>
+      table === "ps_members"
+        ? [
+            {
+              user_id: uid,
+              email: "admin@example.com",
+              role: "admin",
+              active: true,
+            },
+          ]
+        : previousRows(table, configure),
+    );
+    const wrapper = await ready();
+    await button(wrapper, "团队管理").trigger("click");
+    await flushPromises();
+    await wrapper.get('input[autocomplete="off"]').setValue("new@example.com");
+    const field = wrapper.get('input[autocomplete="new-password"]');
+    await field.setValue("Synthetic-initial-password");
+    await button(wrapper, "创建成员").trigger("submit");
+    await flushPromises();
+    expect(f.call).toHaveBeenCalledWith("member.create", {
+      email: "new@example.com",
+      password: "Synthetic-initial-password",
+    });
+    expect((field.element as HTMLInputElement).value).toBe("");
+    expect(wrapper.text()).toContain("成员已添加");
+    expect(localStorage.length).toBe(0);
+    wrapper.unmount();
+  });
+  it("does not expose team management to ordinary members", async () => {
+    const wrapper = await ready();
+    expect(wrapper.findAll("button").some((b) => b.text() === "团队管理")).toBe(
+      false,
+    );
+    expect(
+      wrapper
+        .findAll("input")
+        .some((i) => i.attributes("autocomplete") === "new-password"),
+    ).toBe(false);
+    wrapper.unmount();
+  });
 });

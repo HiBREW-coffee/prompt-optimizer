@@ -24,7 +24,12 @@ import type {
 import { normalizeBundle } from "../../../supabase/functions/_shared/studio-contract";
 
 type Page =
-  "reference" | "text" | "history" | "library" | "favorites" | "admin";
+  | "reference"
+  | "text"
+  | "history"
+  | "library"
+  | "favorites"
+  | "admin";
 type Member = {
   user_id: string;
   email: string;
@@ -75,6 +80,10 @@ const search = ref(""),
   shareImage = ref(false),
   inviteEmail = ref(""),
   inviteUrl = ref(""),
+  newMemberEmail = ref(""),
+  newMemberPassword = ref(""),
+  passwordMember = ref<Member | null>(null),
+  resetMemberPassword = ref(""),
   pendingId = ref("");
 const mode = computed<StudioMode>(() =>
   page.value === "text" ? "text" : "reference",
@@ -239,6 +248,12 @@ function resetEditor() {
 }
 function navigate(target: Page) {
   if (busy.value || !mayLeaveEditor()) return;
+  if (target !== "admin") {
+    newMemberPassword.value = "";
+    resetMemberPassword.value = "";
+    passwordMember.value = null;
+    inviteUrl.value = "";
+  }
   if ((target === "reference" || target === "text") && target !== page.value)
     resetEditor();
   page.value = target;
@@ -279,7 +294,8 @@ async function saveWorkspace() {
     changeText: change.value,
     referencePath: imagePath.value,
   });
-  if (result.workspace.owner_id !== user.value?.id) throw new Error("UNAUTHENTICATED");
+  if (result.workspace.owner_id !== user.value?.id)
+    throw new Error("UNAUTHENTICATED");
   workspace.value = result.workspace;
   title.value = result.workspace.title;
   return result.workspace;
@@ -290,8 +306,12 @@ async function showVersion(version: StudioVersion) {
   draftEn.value = version.bundle.en;
   draftJson.value = JSON.stringify(version.bundle.structured, null, 2);
   analysis.value = null;
-  const found = await rows<AnalysisRow>("ps_analyses", (q) =>
-    q.eq("version_id", version.id).order("created_at", { ascending: false }), 1);
+  const found = await rows<AnalysisRow>(
+    "ps_analyses",
+    (q) =>
+      q.eq("version_id", version.id).order("created_at", { ascending: false }),
+    1,
+  );
   if (selected.value?.id === version.id) analysis.value = found[0] ?? null;
 }
 async function loadVersions(prefer?: string) {
@@ -314,8 +334,11 @@ function mayLeaveEditor() {
 }
 async function chooseVersion(event: Event) {
   const input = event.target as HTMLSelectElement;
-  if (!mayLeaveEditor()) { input.value = selected.value?.id ?? ""; return; }
-  const version = versions.value.find(v => v.id === input.value);
+  if (!mayLeaveEditor()) {
+    input.value = selected.value?.id ?? "";
+    return;
+  }
+  const version = versions.value.find((v) => v.id === input.value);
   if (version) await attempt(() => showVersion(version));
 }
 async function openWork(w: StudioWorkspace) {
@@ -586,6 +609,34 @@ async function invite() {
     await loadLists();
   });
 }
+async function createMember() {
+  const initialPassword = newMemberPassword.value;
+  newMemberPassword.value = "";
+  await attempt(async () => {
+    await call("member.create", {
+      email: newMemberEmail.value,
+      password: initialPassword,
+    });
+    newMemberEmail.value = "";
+    await loadLists();
+    notice.value =
+      "成员已添加。请私下告知邮箱和初始密码，成员登录后可自行修改。";
+  });
+}
+async function changeMemberPassword() {
+  const target = passwordMember.value;
+  if (!target) return;
+  const nextPassword = resetMemberPassword.value;
+  resetMemberPassword.value = "";
+  await attempt(async () => {
+    await call("member.password", {
+      userId: target.user_id,
+      password: nextPassword,
+    });
+    passwordMember.value = null;
+    notice.value = "成员密码已重设。请私下告知对应成员。";
+  });
+}
 async function copyInvite() {
   await attempt(async () => {
     await navigator.clipboard.writeText(inviteUrl.value);
@@ -610,6 +661,11 @@ watch(
     library.value = [];
     members.value = [];
     inviteUrl.value = "";
+    newMemberEmail.value = "";
+    newMemberPassword.value = "";
+    passwordMember.value = null;
+    resetMemberPassword.value = "";
+    password.value = "";
     pendingId.value = "";
     member.value = null;
     if (user.value) void loadMember();
@@ -633,6 +689,9 @@ onMounted(async () => {
   if (!session) loading.value = false;
 });
 onBeforeUnmount(() => {
+  newMemberPassword.value = "";
+  resetMemberPassword.value = "";
+  password.value = "";
   authSubscription?.unsubscribe();
   if (imagePreview.value.startsWith("blob:"))
     URL.revokeObjectURL(imagePreview.value);
@@ -748,6 +807,8 @@ onBeforeUnmount(() => {
         >
         <div>
           <span class="account">{{ member.email }}</span
+          ><button class="quiet" :disabled="busy" @click="setPassword = true">
+            修改密码</button
           ><button class="quiet" @click="logout">退出</button>
         </div>
       </header>
@@ -1209,29 +1270,57 @@ onBeforeUnmount(() => {
             <div>
               <span class="eyebrow">TEAM SETTINGS</span>
               <h1>团队管理</h1>
-              <p>邀请成员，安排公司的模型额度。密钥只在服务器后台配置。</p>
+              <p>添加成员、设置登录密码，安排公司的模型额度。</p>
             </div>
           </div>
           <div class="admin-grid">
             <section class="panel">
-              <h2>邀请成员</h2>
-              <form @submit.prevent="invite">
+              <h2>添加成员</h2>
+              <form @submit.prevent="createMember">
                 <label
                   >成员邮箱<input
-                    v-model="inviteEmail"
+                    v-model="newMemberEmail"
                     type="email"
-                    required /></label
-                ><button class="primary" :disabled="busy">生成邀请链接</button>
+                    autocomplete="off"
+                    required
+                /></label>
+                <label
+                  >初始密码<input
+                    v-model="newMemberPassword"
+                    type="password"
+                    autocomplete="new-password"
+                    minlength="12"
+                    maxlength="128"
+                    required
+                /></label>
+                <p class="hint">
+                  至少 12
+                  位。创建后，成员可以直接使用邮箱和密码登录，并自行修改密码。
+                </p>
+                <button class="primary" :disabled="busy">创建成员</button>
               </form>
-              <div v-if="inviteUrl" class="invite">
-                <p>请私下交给对应成员，链接持有人可进入该账号。</p>
-                <textarea
-                  readonly
-                  :value="inviteUrl"
-                  aria-label="邀请链接"
-                ></textarea
-                ><button @click="copyInvite">复制邀请链接</button>
-              </div>
+              <details>
+                <summary>已有账号？使用邀请链接加入</summary>
+                <form @submit.prevent="invite">
+                  <label
+                    >成员邮箱<input
+                      v-model="inviteEmail"
+                      type="email"
+                      required /></label
+                  ><button class="primary" :disabled="busy">
+                    生成邀请链接
+                  </button>
+                </form>
+                <div v-if="inviteUrl" class="invite">
+                  <p>请私下交给对应成员，链接持有人可进入该账号。</p>
+                  <textarea
+                    readonly
+                    :value="inviteUrl"
+                    aria-label="邀请链接"
+                  ></textarea
+                  ><button @click="copyInvite">复制邀请链接</button>
+                </div>
+              </details>
             </section>
             <form
               class="panel"
@@ -1292,6 +1381,16 @@ onBeforeUnmount(() => {
               >
                 {{ m.active ? "停用" : "启用" }}
               </button>
+              <button
+                v-if="m.role === 'member'"
+                :disabled="busy"
+                @click="
+                  passwordMember = m;
+                  resetMemberPassword = '';
+                "
+              >
+                重设密码
+              </button>
             </div>
           </section></template
         >
@@ -1337,10 +1436,57 @@ onBeforeUnmount(() => {
             type="password"
             autocomplete="new-password"
             minlength="12"
+            maxlength="128"
             required
         /></label>
         <p v-if="error" class="error" role="alert">{{ error }}</p>
         <button class="primary" :disabled="busy">保存密码</button>
+        <button
+          type="button"
+          :disabled="busy"
+          @click="
+            setPassword = false;
+            password = '';
+          "
+        >
+          取消
+        </button>
+      </form>
+    </div>
+    <div v-if="passwordMember" class="modal-backdrop">
+      <form
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="重设成员密码"
+        @submit.prevent="changeMemberPassword"
+      >
+        <h2>重设成员密码</h2>
+        <p>{{ passwordMember.email }}</p>
+        <label
+          >新密码<input
+            v-model="resetMemberPassword"
+            type="password"
+            autocomplete="new-password"
+            minlength="12"
+            maxlength="128"
+            required
+        /></label>
+        <p class="hint">
+          仅支持在本工作室创建的账号。共享其他应用的账号请由成员自行修改，避免影响其他应用。
+        </p>
+        <p v-if="error" class="error" role="alert">{{ error }}</p>
+        <button
+          type="button"
+          :disabled="busy"
+          @click="
+            passwordMember = null;
+            resetMemberPassword = '';
+          "
+        >
+          取消
+        </button>
+        <button class="primary" :disabled="busy">确认重设</button>
       </form>
     </div>
   </div>
