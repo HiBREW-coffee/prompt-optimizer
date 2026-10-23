@@ -17,6 +17,17 @@ export default defineConfig(({ mode }) => {
     envDir: monorepoRoot,
     plugins: [vue()],
     server: {
+      // Development-only same-origin bridge for the Gemini-compatible LK888 endpoint.
+      // The destination is fixed; no arbitrary upstream URL can be supplied by clients.
+      // Forward the caller's existing x-goog-api-key instead of embedding any API key here.
+      proxy: {
+        '/api/ps-gemini': {
+          target: 'https://api.lk888.ai',
+          changeOrigin: true,
+          secure: true,
+          rewrite: (url) => url.replace(/^\/api\/ps-gemini(?=\/|\?|$)/, ''),
+        },
+      },
       port: 18181,
       host: true,
       fs: {
