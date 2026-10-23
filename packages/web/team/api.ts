@@ -50,6 +50,8 @@ export type InspectionRow = Omit<AnalysisRow, "version_id"> & {
   owner_id: string;
 };
 const errors: Record<string, string> = {
+  INVALID_SCORE_SCALE:
+    "模型评分的量表或分值不符合要求，本次未保存分数。请稍后手动重新分析。",
   INCOMPLETE_PROFESSIONAL_REPORT:
     "模型未返回完整的专业报告，本次没有保存不完整版本。请稍后手动重试。",
   INVALID_REFERENCE_IMAGES:

@@ -57,6 +57,8 @@ export interface ProfessionalReport {
 }
 export interface PromptAnalysis {
   score: number;
+  // Absent on legacy records: never infer a scale from a small numeric value.
+  scoreScale?: 100;
   summary: string;
   dimensions: Array<{ name: string; score: number; reason: string }>;
   suggestions: Array<{
@@ -181,12 +183,33 @@ export function normalizeBundle(value: unknown): PromptBundle {
     throw new StudioError("INVALID_MODEL_OUTPUT", 502);
   return bundle;
 }
-export function normalizeAnalysis(value: unknown): PromptAnalysis {
+export function normalizeAnalysis(
+  value: unknown,
+  options: { requireScale?: boolean } = {},
+): PromptAnalysis {
+  if (!record(value)) throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+  const scale = value.scoreScale;
+  if (
+    (scale !== undefined && scale !== 10 && scale !== 100) ||
+    (options.requireScale && scale === undefined)
+  )
+    throw new StudioError("INVALID_SCORE_SCALE", 502);
   const score = (s: unknown) =>
-    typeof s === "number" && Number.isFinite(s) && s >= 0 && s <= 100;
+    typeof s === "number" &&
+    Number.isFinite(s) &&
+    s >= 0 &&
+    s <= (scale ?? 100) &&
+    (scale !== 100 || Number.isInteger(s));
+  const normalizedScore = (s: number) =>
+    scale === undefined ? s : Math.round((s * 100) / scale);
+  const invalidScore = () =>
+    new StudioError(
+      scale === undefined ? "INVALID_MODEL_OUTPUT" : "INVALID_SCORE_SCALE",
+      502,
+    );
+  if (!score(value.score)) throw invalidScore();
   if (
     !record(value) ||
-    !score(value.score) ||
     typeof value.summary !== "string" ||
     value.summary.length > 4000 ||
     !Array.isArray(value.dimensions) ||
@@ -197,16 +220,21 @@ export function normalizeAnalysis(value: unknown): PromptAnalysis {
   )
     throw new StudioError("INVALID_MODEL_OUTPUT", 502);
   const dimensions = value.dimensions.map((d) => {
+    if (!record(d)) throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+    if (!score(d.score)) throw invalidScore();
     if (
       !record(d) ||
-      !score(d.score) ||
       typeof d.name !== "string" ||
       typeof d.reason !== "string" ||
       d.name.length > 100 ||
       d.reason.length > 2000
     )
       throw new StudioError("INVALID_MODEL_OUTPUT", 502);
-    return { name: d.name, score: d.score as number, reason: d.reason };
+    return {
+      name: d.name,
+      score: normalizedScore(d.score as number),
+      reason: d.reason,
+    };
   });
   const suggestions = value.suggestions.map((s, i) => {
     if (
@@ -227,7 +255,8 @@ export function normalizeAnalysis(value: unknown): PromptAnalysis {
     };
   });
   return {
-    score: value.score as number,
+    score: normalizedScore(value.score as number),
+    ...(scale === undefined ? {} : { scoreScale: 100 as const }),
     summary: value.summary,
     dimensions,
     suggestions,

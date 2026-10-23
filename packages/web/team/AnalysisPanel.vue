@@ -17,9 +17,17 @@ const emit = defineEmits<{ apply: [id: string] }>();
       <span class="analysis-kicker">STRUCTURE & INSIGHTS</span>
     </div>
     <div class="analysis-summary">
-      <div class="score">{{ result.score }}<small>/ 100</small></div>
+      <div class="score">
+        {{ result.score
+        }}<small>{{
+          result.scoreScale === 100 ? "/ 100" : "量表待确认"
+        }}</small>
+      </div>
       <p>{{ result.summary }}</p>
     </div>
+    <p v-if="result.scoreScale !== 100" class="banner pending">
+      这份历史分析未声明评分量表，保留原值、不自动换算。重新分析可获得标准百分制评分；原有建议仍可查看。
+    </p>
     <p v-if="stale" class="banner pending">
       输入、图片用途或版本已变化，请重新分析后再应用建议。
     </p>
@@ -34,7 +42,7 @@ const emit = defineEmits<{ apply: [id: string] }>();
         <strong
           >{{ d.name }}<span>{{ d.score }}</span></strong
         >
-        <div class="dimension-track">
+        <div class="dimension-track" v-if="result.scoreScale === 100">
           <i :style="{ width: `${d.score}%` }"></i>
         </div>
         <p>{{ d.reason }}</p>

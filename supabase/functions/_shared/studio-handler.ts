@@ -271,7 +271,9 @@ export function createStudioHandler(deps: HandlerDependencies) {
       const isAnalysis =
         action === "prompt.evaluate" || action === "prompt.inspect";
       const bundle = isAnalysis ? null : normalizeBundle(parsed);
-      const analysisResult = isAnalysis ? normalizeAnalysis(parsed) : null;
+      const analysisResult = isAnalysis
+        ? normalizeAnalysis(parsed, { requireScale: true })
+        : null;
       if (
         analysisResult &&
         (!analysisResult.structure ||

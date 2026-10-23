@@ -75,11 +75,9 @@ function harness(overrides: Partial<StudioStore> = {}) {
       analysis: { version_id: vid, result, context },
     })),
     fail: vi.fn().mockResolvedValue(undefined),
-    inspect: vi
-      .fn()
-      .mockImplementation(async (_u, _w, result, context) => ({
-        inspection: { id: rid, workspace_id: wid, result, context },
-      })),
+    inspect: vi.fn().mockImplementation(async (_u, _w, result, context) => ({
+      inspection: { id: rid, workspace_id: wid, result, context },
+    })),
     command: vi.fn().mockResolvedValue({ ok: true }),
     ...overrides,
   };
@@ -131,6 +129,42 @@ function harness(overrides: Partial<StudioStore> = {}) {
   return { store, fetcher, generate, handler, request };
 }
 describe("authenticated team AI chain", () => {
+  it.each(["prompt.inspect", "prompt.evaluate"])(
+    "rejects ambiguous scoring from %s without persisting it or retrying",
+    async (action) => {
+      const h = harness();
+      h.generate.mockResolvedValue(
+        JSON.stringify({
+          score: 6.8,
+          summary: "整体较好，但仍有细节可补充",
+          dimensions: ["主体", "机位", "光线", "材质"].map((name) => ({
+            name,
+            score: 6.9,
+            reason: "有视觉依据",
+          })),
+          structure: ["主体", "机位", "光线", "材质"].map((title) => ({
+            title,
+            content: "可观察的结构",
+          })),
+          imageRoles: [
+            { index: 1, role: "产品", evidence: "咖啡机", use: "保留外观" },
+          ],
+          suggestions: [],
+        }),
+      );
+      const response = await h.request({
+        action,
+        workspaceId: wid,
+        requestId: rid,
+        ...(action === "prompt.evaluate" ? { versionId: vid } : {}),
+      });
+      expect(response.status).toBe(502);
+      expect(await response.json()).toEqual({ error: "INVALID_SCORE_SCALE" });
+      expect(h.store.inspect).not.toHaveBeenCalled();
+      expect(h.store.analyze).not.toHaveBeenCalled();
+      expect(h.generate).toHaveBeenCalledTimes(1);
+    },
+  );
   it.each(["reference.extract", "reference.rewrite"])(
     "%s includes original image and requirements through fallback and saves one version",
     async (action) => {
@@ -161,6 +195,7 @@ describe("authenticated team AI chain", () => {
   it("prompt-only evaluation is genuinely multimodal and retains version/context binding", async () => {
     const h = harness();
     const result = {
+      scoreScale: 100,
       score: 83,
       summary: "需要更具体的光线描述",
       dimensions: ["保真度", "构图", "光线", "一致性"].map((name) => ({
@@ -249,15 +284,13 @@ describe("authenticated team AI chain", () => {
       }),
     );
     const h = harness({
-      workspace: vi
-        .fn()
-        .mockResolvedValue({
-          ...workspace,
-          source_text: "图1产品使用图2场景、图3人物、图4光线、图5细节",
-          reference_images: refs,
-          intent: "style",
-          template_id: "multiimage",
-        }),
+      workspace: vi.fn().mockResolvedValue({
+        ...workspace,
+        source_text: "图1产品使用图2场景、图3人物、图4光线、图5细节",
+        reference_images: refs,
+        intent: "style",
+        template_id: "multiimage",
+      }),
     });
     h.generate.mockResolvedValue(
       JSON.stringify({
@@ -300,6 +333,7 @@ describe("authenticated team AI chain", () => {
     const h = harness();
     h.generate.mockResolvedValue(
       JSON.stringify({
+        scoreScale: 100,
         score: 68,
         summary: "主体明确，场景用途需要补充",
         dimensions: ["主体", "构图", "光线", "一致性"].map((name) => ({
@@ -374,14 +408,11 @@ describe("authenticated team AI chain", () => {
         note: "",
       }));
       const h = harness({
-        workspace: vi
-          .fn()
-          .mockResolvedValue({
-            ...workspace,
-            reference_images: refs,
-            source_text:
-              type === "missing-index" ? "用图3做背景" : "组合参考图",
-          }),
+        workspace: vi.fn().mockResolvedValue({
+          ...workspace,
+          reference_images: refs,
+          source_text: type === "missing-index" ? "用图3做背景" : "组合参考图",
+        }),
       });
       const response = await h.request({
         action: "reference.extract",

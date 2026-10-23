@@ -621,6 +621,7 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
           "SERVER_CONFIGURATION",
           "MODEL_DETAIL_LOSS",
           "INCOMPLETE_PROFESSIONAL_REPORT",
+          "INVALID_SCORE_SCALE",
           "REFERENCE_INDEX_MISSING",
         ].includes(e.message)
       ) {
