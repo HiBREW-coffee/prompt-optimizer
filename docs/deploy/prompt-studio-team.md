@@ -60,7 +60,7 @@ supabase functions deploy prompt-studio-api --project-ref YOUR_PROJECT_REF
 | Root directory | 仓库根目录 |
 | Build command | `pnpm build:team` |
 | Build output directory | `packages/web/dist-team` |
-| `NODE_VERSION` | `24` |
+| `NODE_VERSION` | `24.22.1`（必须填写完整版本） |
 | `PNPM_VERSION` | `10.6.1` |
 | `VITE_TEAM_SUPABASE_URL` | Supabase 项目公开 HTTPS URL |
 | `VITE_TEAM_SUPABASE_ANON_KEY` | Supabase **publishable / anon 公共客户端值**，必须由所有者在平台内填写 |
@@ -68,6 +68,10 @@ supabase functions deploy prompt-studio-api --project-ref YOUR_PROJECT_REF
 不要填写模型 Key、`service_role` 或 `sb_secret_*`。构建会拒绝服务器密钥作为客户端配置。本构建不加载原应用的 `.env` 或其他 `VITE_*` 模型配置。首次发布得到 `pages.dev` 地址后填回 `PS_APP_URL` 和 `PS_ALLOWED_ORIGINS`；在 Supabase Auth 的 Redirect URLs 添加这个确切根地址，不改其他应用的 Site URL 或已有跳转列表。预览地址默认不能调用后台，需明确加入允许列表才可使用。
 
 Cloudflare Git 集成负责每次推送自动发布；`Prompt Studio Team` GitHub Actions 负责校验并保留独立构建产物。不能因 CI 通过而声称数据库、函数或 Pages 已发布。
+
+### 构建在安装依赖时失败：ERR_PNPM_UNSUPPORTED_ENGINE
+
+若日志显示 Node `24.13.1`，以及 `nopt@10.0.1` 要求 `^24.15.0`，将 Cloudflare 的 `NODE_VERSION` 改为完整的 `24.22.1` 后保存并重新部署。只写 `24` 可能被平台解析成旧版本；环境变量会覆盖仓库的 `.node-version`。不要关闭 `engine-strict` 或绕过依赖检查。此错误出现在前端构建之前，与模型凭据无关。
 
 ## 4. 首位管理员与成员邀请
 
