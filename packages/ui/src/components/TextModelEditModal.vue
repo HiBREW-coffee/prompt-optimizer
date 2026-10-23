@@ -408,6 +408,9 @@ const applyGeminiBridgePreset = () => {
   if (!showGeminiBridgePreset.value) return
   const modelId = 'gem-3.8-flash'
   form.value.connectionConfig.baseURL = `${window.location.origin}/api/ps-gemini`
+  if (!modelOptions.value.some(option => option.value === modelId)) {
+    modelOptions.value.push({ value: modelId, label: modelId })
+  }
   form.value.modelId = modelId
   form.value.defaultModel = modelId
   form.value.enabled = true
