@@ -1,12 +1,16 @@
 import {
   AI_ACTIONS,
   REQUEST_TIMEOUT_MS,
+  MAX_TOTAL_IMAGE_BYTES,
   StudioError,
   imageMime,
   limitedText,
   normalizeAnalysis,
   normalizeBundle,
-  ownsImage,
+  normalizeReferences,
+  workspaceReferences,
+  workspaceContext,
+  validateReferenceMentions,
   parseObject,
   record,
   requireId,
@@ -39,9 +43,10 @@ export interface StudioStore {
   suggestion(
     user: string,
     analysisId: string,
-    versionId: string,
+    versionId: string | null,
     suggestionId: string,
     context: unknown,
+    workspaceId?: string,
   ): Promise<string>;
   save(
     user: string,
@@ -54,6 +59,13 @@ export interface StudioStore {
   analyze(
     user: string,
     versionId: string,
+    result: unknown,
+    context: unknown,
+    request: string,
+  ): Promise<unknown>;
+  inspect(
+    user: string,
+    workspace: string,
     result: unknown,
     context: unknown,
     request: string,
@@ -115,7 +127,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
       userId = user.id;
       const member = await store.member(user.id);
       if (!member?.active) throw new StudioError("NOT_MEMBER", 403);
-      const text = await readBody(request, 100_000);
+      const text = await readBody(request, 200_000);
       let body: Record<string, unknown>;
       try {
         const parsed: unknown = JSON.parse(text);
@@ -151,17 +163,22 @@ export function createStudioHandler(deps: HandlerDependencies) {
         throw new StudioError("VERSION_REQUIRED");
       if (action === "reference.extract" && version)
         throw new StudioError("INVALID_ACTION");
-      if (
-        workspace.mode === "reference" &&
-        !ownsImage(workspace.reference_path, user.id)
-      )
+      const references = normalizeReferences(
+        workspaceReferences(workspace),
+        user.id,
+      );
+      if (workspace.mode === "reference" && references.length === 0)
         throw new StudioError("IMAGE_REQUIRED");
-      const context = {
-        source: workspace.source_text,
-        keep: workspace.keep_text,
-        change: workspace.change_text,
-        reference_path: workspace.reference_path,
-      };
+      if (workspace.mode === "reference")
+        validateReferenceMentions(
+          [
+            workspace.source_text,
+            workspace.keep_text,
+            workspace.change_text,
+          ].join("\n"),
+          references.length,
+        );
+      const context = workspaceContext(workspace);
       let suggestion = "";
       if (body.analysisId) {
         if (!version) throw new StudioError("VERSION_REQUIRED");
@@ -171,6 +188,17 @@ export function createStudioHandler(deps: HandlerDependencies) {
           version.id,
           limitedText(body.suggestionId, 10),
           context,
+        );
+      }
+      if (body.inspectionId) {
+        if (body.analysisId) throw new StudioError("INVALID_REQUEST");
+        suggestion = await store.suggestion(
+          user.id,
+          requireId(body.inspectionId),
+          null,
+          limitedText(body.suggestionId, 30),
+          context,
+          workspace.id,
         );
       }
       const id = requireId(body.requestId);
@@ -217,13 +245,22 @@ export function createStudioHandler(deps: HandlerDependencies) {
         suggestion,
       );
       if (workspace.mode === "reference") {
-        const bytes = await store.image(workspace.reference_path!);
-        const mimeType = imageMime(bytes);
-        // Chunked encoding avoids an argument-stack overflow for a 10MB image.
-        let binary = "";
-        for (let start = 0; start < bytes.length; start += 8192)
-          binary += String.fromCharCode(...bytes.subarray(start, start + 8192));
-        input.image = { data: btoa(binary), mimeType };
+        let totalBytes = 0;
+        input.images = [];
+        for (const [index, reference] of references.entries()) {
+          const bytes = await store.image(reference.path);
+          totalBytes += bytes.length;
+          if (totalBytes > MAX_TOTAL_IMAGE_BYTES)
+            throw new StudioError("IMAGES_TOO_LARGE");
+          const mimeType = imageMime(bytes);
+          // Chunked encoding avoids an argument-stack overflow for a 10MB image.
+          let binary = "";
+          for (let start = 0; start < bytes.length; start += 8192)
+            binary += String.fromCharCode(
+              ...bytes.subarray(start, start + 8192),
+            );
+          input.images.push({ data: btoa(binary), mimeType, index: index + 1 });
+        }
       }
       if (controller.signal.aborted)
         throw new StudioError("REQUEST_TIMEOUT", 504);
@@ -231,8 +268,32 @@ export function createStudioHandler(deps: HandlerDependencies) {
       if (controller.signal.aborted)
         throw new StudioError("REQUEST_TIMEOUT", 504);
       const parsed = parseObject(raw);
-      const bundle =
-        action === "prompt.evaluate" ? null : normalizeBundle(parsed);
+      const isAnalysis =
+        action === "prompt.evaluate" || action === "prompt.inspect";
+      const bundle = isAnalysis ? null : normalizeBundle(parsed);
+      const analysisResult = isAnalysis ? normalizeAnalysis(parsed) : null;
+      if (
+        analysisResult &&
+        (!analysisResult.structure ||
+          analysisResult.structure.length < 4 ||
+          analysisResult.dimensions.length < 4 ||
+          !analysisResult.imageRoles ||
+          analysisResult.imageRoles.length !== references.length ||
+          analysisResult.imageRoles.some(
+            (item) => item.index > references.length,
+          ))
+      )
+        throw new StudioError("INCOMPLETE_PROFESSIONAL_REPORT", 502);
+      if (
+        bundle &&
+        (!bundle.report ||
+          bundle.report.sections.length < 4 ||
+          bundle.report.imageRoles.length !== references.length ||
+          bundle.report.imageRoles.some(
+            (item) => item.index > references.length,
+          ))
+      )
+        throw new StudioError("INCOMPLETE_PROFESSIONAL_REPORT", 502);
       if (bundle && version && (action === "reference.rewrite" || suggestion)) {
         if (
           Object.keys(version.bundle.structured).some(
@@ -242,22 +303,30 @@ export function createStudioHandler(deps: HandlerDependencies) {
           throw new StudioError("MODEL_DETAIL_LOSS", 502);
       }
       const result =
-        action === "prompt.evaluate"
-          ? await store.analyze(
+        action === "prompt.inspect"
+          ? await store.inspect(
               user.id,
-              version!.id,
-              normalizeAnalysis(parsed),
+              workspace.id,
+              analysisResult!,
               context,
               id,
             )
-          : await store.save(
-              user.id,
-              workspace,
-              version?.id ?? null,
-              bundle!,
-              action,
-              id,
-            );
+          : action === "prompt.evaluate"
+            ? await store.analyze(
+                user.id,
+                version!.id,
+                analysisResult!,
+                context,
+                id,
+              )
+            : await store.save(
+                user.id,
+                workspace,
+                version?.id ?? null,
+                bundle!,
+                action,
+                id,
+              );
       return new Response(JSON.stringify(result), { headers });
     } catch (error) {
       const known = error instanceof StudioError ? error : null;

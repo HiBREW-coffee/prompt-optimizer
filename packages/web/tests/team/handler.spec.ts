@@ -14,6 +14,23 @@ const bundle = {
   structured: { subject: "silver coffee machine" },
   observations: ["左侧柔光"],
   uncertainties: ["品牌无法确认"],
+  report: {
+    intent: "保留图1咖啡机并调整银色",
+    imageRoles: [
+      { index: 1, role: "产品主体", evidence: "咖啡机", use: "保留机位与外形" },
+    ],
+    anchors: [{ title: "主体", content: "咖啡机外形" }],
+    changes: [],
+    sections: [
+      { title: "主体", content: "银色咖啡机" },
+      { title: "构图", content: "保持机位" },
+      { title: "光线", content: "左侧柔光" },
+      { title: "材质", content: "金属" },
+    ],
+    negative: { zh: "不改外形", en: "no structural changes" },
+    parameters: [],
+    checks: ["主体一致"],
+  },
 };
 const workspace = {
   id: wid,
@@ -58,6 +75,11 @@ function harness(overrides: Partial<StudioStore> = {}) {
       analysis: { version_id: vid, result, context },
     })),
     fail: vi.fn().mockResolvedValue(undefined),
+    inspect: vi
+      .fn()
+      .mockImplementation(async (_u, _w, result, context) => ({
+        inspection: { id: rid, workspace_id: wid, result, context },
+      })),
     command: vi.fn().mockResolvedValue({ ok: true }),
     ...overrides,
   };
@@ -123,7 +145,8 @@ describe("authenticated team AI chain", () => {
       expect(h.fetcher).toHaveBeenCalledTimes(2);
       expect(h.store.save).toHaveBeenCalledTimes(1);
       const input = JSON.parse(String(h.fetcher.mock.calls[0][1]?.body));
-      expect(input.contents[0].parts[1].inlineData.mimeType).toBe("image/png");
+      expect(input.contents[0].parts[2].inlineData.mimeType).toBe("image/png");
+      expect(input.contents[0].parts[1].text).toContain("图1");
       expect(input.contents[0].parts[0].text).toContain("保持机位与光线");
       expect(input.contents[0].parts[0].text).toContain("改为银色");
       expect(input.systemInstruction.parts[0].text).toContain(
@@ -140,7 +163,18 @@ describe("authenticated team AI chain", () => {
     const result = {
       score: 83,
       summary: "需要更具体的光线描述",
-      dimensions: [{ name: "保真度", score: 83, reason: "左侧光线吻合" }],
+      dimensions: ["保真度", "构图", "光线", "一致性"].map((name) => ({
+        name,
+        score: 83,
+        reason: "有图像证据",
+      })),
+      structure: ["主体", "构图", "光线", "材质"].map((title) => ({
+        title,
+        content: "可观察事实与约束",
+      })),
+      imageRoles: [
+        { index: 1, role: "产品", evidence: "咖啡机", use: "保持主体" },
+      ],
       suggestions: [
         {
           title: "补充光线方向",
@@ -170,7 +204,7 @@ describe("authenticated team AI chain", () => {
     });
     expect(response.status).toBe(200);
     const input = JSON.parse(String(h.fetcher.mock.calls[1][1]?.body));
-    expect(input.contents[0].parts).toHaveLength(2);
+    expect(input.contents[0].parts).toHaveLength(3);
     expect(input.contents[0].parts[0].text).toContain(bundle.en);
     expect(h.store.analyze).toHaveBeenCalledWith(
       uid,
@@ -189,6 +223,12 @@ describe("authenticated team AI chain", () => {
         reference_path: null,
       }),
     });
+    h.generate.mockResolvedValue(
+      JSON.stringify({
+        ...bundle,
+        report: { ...bundle.report, imageRoles: [] },
+      }),
+    );
     expect(
       (
         await h.request({
@@ -200,21 +240,189 @@ describe("authenticated team AI chain", () => {
     ).toBe(200);
     expect(h.store.image).not.toHaveBeenCalled();
   });
-  it("rejects a rewrite that merges away existing structured fields without saving or retrying", async () => {
+  it("labels all five images and carries their roles, intent and template into the same request", async () => {
+    const refs = ["product", "scene", "person", "style", "detail"].map(
+      (role, index) => ({
+        path: `${uid}/${index + 1}.png`,
+        role,
+        note: `图${index + 1}用途`,
+      }),
+    );
     const h = harness({
-      version: vi
+      workspace: vi
         .fn()
         .mockResolvedValue({
-          ...version,
-          bundle: {
-            ...bundle,
-            structured: {
-              主体: "白色竖条纹咖啡机、黑屏、橙色标牌",
-              光线: "左侧柔光",
-              场景: "厨房",
-            },
-          },
+          ...workspace,
+          source_text: "图1产品使用图2场景、图3人物、图4光线、图5细节",
+          reference_images: refs,
+          intent: "style",
+          template_id: "multiimage",
         }),
+    });
+    h.generate.mockResolvedValue(
+      JSON.stringify({
+        ...bundle,
+        report: {
+          ...bundle.report,
+          imageRoles: refs.map((r, i) => ({
+            index: i + 1,
+            role: r.role,
+            evidence: "可见事实",
+            use: r.note,
+          })),
+        },
+      }),
+    );
+    const response = await h.request({
+      action: "reference.extract",
+      workspaceId: wid,
+      requestId: rid,
+    });
+    expect(response.status).toBe(200);
+    const input = h.generate.mock.calls[0][0];
+    expect(input.images?.map((i) => i.index)).toEqual([1, 2, 3, 4, 5]);
+    const context = JSON.parse(input.text);
+    expect(context.images.map((i: any) => i.label)).toEqual([
+      "图1",
+      "图2",
+      "图3",
+      "图4",
+      "图5",
+    ]);
+    expect(context.images.map((i: any) => i.role)).toEqual(
+      refs.map((i) => i.role),
+    );
+    expect(context).toMatchObject({ intent: "style", template: "multiimage" });
+    expect(input.system).toContain("风格学习");
+    expect(h.store.image).toHaveBeenCalledTimes(5);
+  });
+  it("analyzes raw input and images before any generated version, without appending a version", async () => {
+    const h = harness();
+    h.generate.mockResolvedValue(
+      JSON.stringify({
+        score: 68,
+        summary: "主体明确，场景用途需要补充",
+        dimensions: ["主体", "构图", "光线", "一致性"].map((name) => ({
+          name,
+          score: 68,
+          reason: "图1可见",
+        })),
+        structure: ["目标", "约束", "关系", "格式"].map((title) => ({
+          title,
+          content: "原文要求保持机位",
+        })),
+        anchors: [],
+        conflicts: [],
+        imageRoles: [
+          { index: 1, role: "产品", evidence: "咖啡机", use: "保持" },
+        ],
+        suggestions: [
+          {
+            title: "补充支撑面",
+            reason: "空间缺口",
+            instruction: "说明台面和接触阴影",
+          },
+        ],
+      }),
+    );
+    const response = await h.request({
+      action: "prompt.inspect",
+      workspaceId: wid,
+      requestId: rid,
+    });
+    expect(response.status).toBe(200);
+    expect(h.store.inspect).toHaveBeenCalledWith(
+      uid,
+      wid,
+      expect.objectContaining({ structure: expect.any(Array) }),
+      expect.objectContaining({ source: workspace.source_text }),
+      rid,
+    );
+    expect(h.store.save).not.toHaveBeenCalled();
+    expect(h.store.version).not.toHaveBeenCalled();
+    expect(h.generate.mock.calls[0][0].images).toHaveLength(1);
+  });
+  it("applies an input-analysis suggestion using its workspace and current full context", async () => {
+    const h = harness();
+    const inspectId = "55555555-5555-4555-8555-555555555555";
+    const response = await h.request({
+      action: "reference.extract",
+      workspaceId: wid,
+      requestId: rid,
+      inspectionId: inspectId,
+      suggestionId: "1",
+    });
+    expect(response.status).toBe(200);
+    expect(h.store.suggestion).toHaveBeenCalledWith(
+      uid,
+      inspectId,
+      null,
+      "1",
+      expect.objectContaining({ reference_images: expect.any(Array) }),
+      wid,
+    );
+    expect(
+      JSON.parse(h.generate.mock.calls[0][0].text).requestedSuggestion,
+    ).toBe("具体修改");
+  });
+  it.each(["six", "foreign", "missing-index"])(
+    "rejects unsafe image mapping %s before quota admission or model usage",
+    async (type) => {
+      const refs = Array.from({ length: type === "six" ? 6 : 2 }, (_, i) => ({
+        path: `${type === "foreign" && i === 1 ? "another-user" : uid}/${i + 1}.png`,
+        role: "auto",
+        note: "",
+      }));
+      const h = harness({
+        workspace: vi
+          .fn()
+          .mockResolvedValue({
+            ...workspace,
+            reference_images: refs,
+            source_text:
+              type === "missing-index" ? "用图3做背景" : "组合参考图",
+          }),
+      });
+      const response = await h.request({
+        action: "reference.extract",
+        workspaceId: wid,
+        requestId: rid,
+      });
+      expect(response.status).toBe(400);
+      expect(h.store.begin).not.toHaveBeenCalled();
+      expect(h.generate).not.toHaveBeenCalled();
+    },
+  );
+  it("rejects an abbreviated report rather than saving a superficially successful result", async () => {
+    const h = harness();
+    const { report, ...abbreviated } = bundle;
+    void report;
+    h.generate.mockResolvedValue(JSON.stringify(abbreviated));
+    const response = await h.request({
+      action: "reference.extract",
+      workspaceId: wid,
+      requestId: rid,
+    });
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "INCOMPLETE_PROFESSIONAL_REPORT",
+    });
+    expect(h.store.save).not.toHaveBeenCalled();
+    expect(h.generate).toHaveBeenCalledTimes(1);
+  });
+  it("rejects a rewrite that merges away existing structured fields without saving or retrying", async () => {
+    const h = harness({
+      version: vi.fn().mockResolvedValue({
+        ...version,
+        bundle: {
+          ...bundle,
+          structured: {
+            主体: "白色竖条纹咖啡机、黑屏、橙色标牌",
+            光线: "左侧柔光",
+            场景: "厨房",
+          },
+        },
+      }),
     });
     h.generate.mockResolvedValue(
       JSON.stringify({
@@ -494,7 +702,7 @@ describe("authenticated team AI chain", () => {
       ).status,
     ).toBe(403);
     expect(
-      (await h.request({ action: "status", padding: "a".repeat(110_000) }))
+      (await h.request({ action: "status", padding: "a".repeat(210_000) }))
         .status,
     ).toBe(413);
   });

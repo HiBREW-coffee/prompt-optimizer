@@ -1,5 +1,23 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
+import ReferenceBoard from "./ReferenceBoard.vue";
+import ProfessionalReportView from "./ProfessionalReport.vue";
+import AnalysisPanel from "./AnalysisPanel.vue";
+import StudioIcon from "./StudioIcon.vue";
+import {
+  STUDIO_TEMPLATES,
+  STUDIO_INSPIRATIONS,
+} from "../../../supabase/functions/_shared/studio-catalog";
+import {
+  workspaceReferences,
+  workspaceContext,
+  stableJson,
+} from "../../../supabase/functions/_shared/studio-contract";
+import type {
+  ReferenceImage,
+  ReferenceIntent,
+  AiAction,
+} from "../../../supabase/functions/_shared/studio-contract";
 import type { User } from "@supabase/supabase-js";
 import {
   db,
@@ -19,9 +37,11 @@ import type {
   StudioVersion,
   PromptBundle,
   AnalysisRow,
+  InspectionRow,
   LibraryRow,
 } from "./api";
 import { normalizeBundle } from "../../../supabase/functions/_shared/studio-contract";
+const AVATAR_URL = "/dongwu-avatar.png";
 
 type Page =
   | "reference"
@@ -51,15 +71,19 @@ const title = ref(""),
   source = ref(""),
   keep = ref(""),
   change = ref(""),
-  imagePath = ref<string | null>(null),
-  imagePreview = ref("");
+  images = ref<Array<ReferenceImage & { preview: string }>>([]),
+  intent = ref<ReferenceIntent>("replicate"),
+  templateId = ref("ecommerce"),
+  inspirationOpen = ref(false),
+  inspection = ref<InspectionRow | null>(null);
+const imagePath = computed(() => images.value[0]?.path ?? null);
 const workspace = ref<StudioWorkspace | null>(null),
   versions = ref<StudioVersion[]>([]),
   selected = ref<StudioVersion | null>(null);
 const draftZh = ref(""),
   draftEn = ref(""),
   draftJson = ref(""),
-  outputTab = ref<"zh" | "en" | "json">("zh"),
+  outputTab = ref<"report" | "zh" | "en" | "json">("report"),
   analysis = ref<AnalysisRow | null>(null);
 const workspaces = ref<StudioWorkspace[]>([]),
   library = ref<LibraryRow[]>([]),
@@ -99,14 +123,38 @@ const dirty = computed(
       draftJson.value !==
         JSON.stringify(selected.value.bundle.structured, null, 2)),
 );
+function editorContext() {
+  return workspaceContext({
+    id: workspace.value?.id ?? "",
+    owner_id: user.value?.id ?? "",
+    title: title.value,
+    mode: mode.value,
+    source_text: source.value,
+    keep_text: keep.value,
+    change_text: "",
+    reference_path: imagePath.value,
+    reference_images: images.value.map(({ path, role, note }) => ({
+      path,
+      role,
+      note,
+    })),
+    intent: intent.value,
+    template_id: templateId.value,
+    current_version_id: workspace.value?.current_version_id ?? null,
+    favorite: false,
+  });
+}
 const analysisStale = computed(
   () =>
     !analysis.value ||
     analysis.value.version_id !== selected.value?.id ||
     dirty.value ||
-    analysis.value.context.keep !== keep.value ||
-    analysis.value.context.change !== change.value ||
-    analysis.value.context.source !== source.value,
+    stableJson(analysis.value.context) !== stableJson(editorContext()),
+);
+const inspectionStale = computed(
+  () =>
+    !inspection.value ||
+    stableJson(inspection.value.context) !== stableJson(editorContext()),
 );
 const previous = computed(() =>
   versions.value.find((v) => v.id === compareId.value),
@@ -254,15 +302,16 @@ function resetEditor() {
   source.value = "";
   keep.value = "";
   change.value = "";
-  imagePath.value = null;
-  if (imagePreview.value.startsWith("blob:"))
-    URL.revokeObjectURL(imagePreview.value);
-  imagePreview.value = "";
+  releasePreviews();
+  images.value = [];
+  inspection.value = null;
+  intent.value = "replicate";
+  templateId.value = "ecommerce";
   draftZh.value = "";
   draftEn.value = "";
   draftJson.value = "";
   compareId.value = "";
-  outputTab.value = "zh";
+  outputTab.value = "report";
 }
 function navigate(target: Page) {
   if (busy.value || !mayLeaveEditor()) return;
@@ -285,22 +334,96 @@ function newWork() {
   resetEditor();
   notice.value = "已新建，之前保存的作品可在历史记录中查看。";
 }
+function releasePreviews() {
+  for (const image of images.value)
+    if (image.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
+}
+async function loadReferences(w: StudioWorkspace) {
+  const owner = user.value?.id;
+  const result = await Promise.all(
+    workspaceReferences(w).map(async (image) => ({
+      ...image,
+      preview: await signedImage(image.path),
+    })),
+  );
+  if (user.value?.id === owner) images.value = result;
+}
+function removeImage(index: number) {
+  if (busy.value || selected.value) return;
+  const [image] = images.value.splice(index, 1);
+  if (image?.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
+}
+function moveImage(index: number, direction: number) {
+  if (busy.value || selected.value) return;
+  const next = index + direction;
+  if (next < 0 || next >= images.value.length) return;
+  const [image] = images.value.splice(index, 1);
+  images.value.splice(next, 0, image!);
+}
+function updateImage(index: number, key: "role" | "note", value: string) {
+  if (busy.value) return;
+  const image = images.value[index];
+  if (!image) return;
+  if (key === "role") image.role = value as ReferenceImage["role"];
+  else image.note = value;
+}
 async function chooseImage(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files ?? []);
   await attempt(async () => {
-    const file = (event.target as HTMLInputElement).files?.[0];
-    if (!file) return;
-    if (selected.value) {
-      error.value = "更换参考图请先新建作品。";
-      return;
+    if (!files.length) return;
+    if (selected.value) throw new Error("REFERENCE_LOCKED");
+    if (images.value.length + files.length > 5)
+      throw new Error("INVALID_REFERENCE_IMAGES");
+    if (
+      files.some(
+        (file) =>
+          !["image/png", "image/jpeg"].includes(file.type) ||
+          file.size > 10 * 1024 * 1024,
+      )
+    )
+      throw new Error("INVALID_IMAGE");
+    for (const file of files) {
+      const result = await uploadImage(file, user.value!.id);
+      images.value.push({ ...result, role: "auto", note: "" });
     }
-    const result = await uploadImage(file, user.value!.id);
-    imagePath.value = result.path;
-    if (imagePreview.value.startsWith("blob:"))
-      URL.revokeObjectURL(imagePreview.value);
-    imagePreview.value = result.preview;
-    notice.value = "参考图已存入私人空间。";
+    notice.value = "参考图已存入私人空间，图号按当前顺序对应。";
   });
-  (event.target as HTMLInputElement).value = "";
+  input.value = "";
+}
+function useInspiration(index: number) {
+  if (busy.value) return;
+  const item = STUDIO_INSPIRATIONS[index];
+  if (!item) return;
+  const combined = source.value.trim()
+    ? `${source.value}\n\n灵感方向：${item.prompt}`
+    : item.prompt;
+  if (combined.length > 32000) {
+    error.value = "提示词已接近长度上限，请先精简后再加入灵感。";
+    return;
+  }
+  source.value = combined;
+  intent.value = "inspiration";
+  templateId.value = item.template;
+  inspirationOpen.value = false;
+  notice.value = "灵感已带入提示词；请按实际图片调整图号与要求。";
+}
+async function loadInspection() {
+  if (!workspace.value) return;
+  const id = workspace.value.id;
+  const found = await rows<InspectionRow>(
+    "ps_inspections",
+    (q) => q.eq("workspace_id", id).order("created_at", { ascending: false }),
+    1,
+  );
+  if (workspace.value?.id === id) inspection.value = found[0] ?? null;
+}
+async function refreshUsage() {
+  try {
+    const status = await call<{ used: number; dailyLimit: number }>("status");
+    used.value = status.used;
+    dailyLimit.value = status.dailyLimit;
+  } catch {}
 }
 async function saveWorkspace() {
   const result = await call<{ workspace: StudioWorkspace }>("workspace.save", {
@@ -309,8 +432,14 @@ async function saveWorkspace() {
     title: title.value || source.value.slice(0, 28) || "参考图提炼",
     sourceText: source.value,
     keepText: keep.value,
-    changeText: change.value,
+    changeText: "",
     referencePath: imagePath.value,
+    referenceImages:
+      mode.value === "reference"
+        ? images.value.map(({ path, role, note }) => ({ path, role, note }))
+        : [],
+    intent: intent.value,
+    templateId: templateId.value,
   });
   if (result.workspace.owner_id !== user.value?.id)
     throw new Error("UNAUTHENTICATED");
@@ -368,10 +497,18 @@ async function openWork(w: StudioWorkspace) {
     source.value = w.source_text;
     keep.value = w.keep_text;
     change.value = w.change_text;
-    imagePath.value = w.reference_path;
-    if (w.reference_path)
-      imagePreview.value = await signedImage(w.reference_path);
+    source.value = [
+      w.source_text,
+      w.change_text ? "需要修改：" + w.change_text : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    change.value = "";
+    intent.value = w.intent ?? "replicate";
+    templateId.value = w.template_id ?? "ecommerce";
+    await loadReferences(w);
     await loadVersions();
+    await loadInspection();
   });
 }
 function bundleFromEditor(): PromptBundle {
@@ -387,6 +524,9 @@ function bundleFromEditor(): PromptBundle {
     structured,
     observations: selected.value?.bundle.observations ?? [],
     uncertainties: selected.value?.bundle.uncertainties ?? [],
+    ...(selected.value?.bundle.report
+      ? { report: selected.value.bundle.report }
+      : {}),
   });
 }
 async function saveDraft() {
@@ -414,14 +554,7 @@ async function acceptVersion(data: {
     notice.value =
       "其他页面已更新当前版本，本次结果仍已保存。可查看对比后恢复为新版本。";
 }
-async function run(
-  action:
-    | "text.optimize"
-    | "reference.extract"
-    | "reference.rewrite"
-    | "prompt.evaluate",
-  suggestionId?: string,
-) {
+async function run(action: AiAction, suggestionId?: string, fromInput = false) {
   await attempt(async () => {
     const owner = user.value?.id;
     if (mode.value === "reference" && !imagePath.value) {
@@ -432,11 +565,14 @@ async function run(
       error.value = "请先输入需要优化的文字。";
       return;
     }
-    if (suggestionId && analysisStale.value) {
+    if (
+      suggestionId &&
+      (fromInput ? inspectionStale.value : analysisStale.value)
+    ) {
       error.value = "请重新分析当前版本后应用建议。";
       return;
     }
-    const analysisId = analysis.value?.id;
+    const analysisId = fromInput ? inspection.value?.id : analysis.value?.id;
     await saveDraft();
     const id = crypto.randomUUID();
     pendingId.value = id;
@@ -446,12 +582,18 @@ async function run(
         version?: StudioVersion;
         became_current?: boolean;
         analysis?: AnalysisRow;
+        inspection?: InspectionRow;
         pending?: boolean;
       }>(action, {
         workspaceId: workspace.value!.id,
-        versionId: selected.value?.id,
+        versionId: action === "prompt.inspect" ? undefined : selected.value?.id,
         requestId: id,
-        ...(suggestionId ? { analysisId, suggestionId } : {}),
+        ...(suggestionId
+          ? {
+              [fromInput ? "inspectionId" : "analysisId"]: analysisId,
+              suggestionId,
+            }
+          : {}),
       });
       if (user.value?.id !== owner) return;
       if (result.pending) {
@@ -464,12 +606,29 @@ async function run(
           became_current: result.became_current === true,
         });
       if (result.analysis) analysis.value = result.analysis;
+      if (result.inspection) inspection.value = result.inspection;
       pendingId.value = "";
       localStorage.removeItem(`ps-pending-${user.value!.id}`);
-      used.value++;
+      await refreshUsage();
       await loadLists();
     } catch (e) {
-      notice.value = "可查询上次结果，避免重复发起模型调用。";
+      if (
+        e instanceof Error &&
+        [
+          "MODEL_HTTP_401",
+          "MODEL_HTTP_403",
+          "MODEL_NOT_CONFIGURED",
+          "SERVER_CONFIGURATION",
+          "MODEL_DETAIL_LOSS",
+          "INCOMPLETE_PROFESSIONAL_REPORT",
+          "REFERENCE_INDEX_MISSING",
+        ].includes(e.message)
+      ) {
+        pendingId.value = "";
+        localStorage.removeItem("ps-pending-" + user.value!.id);
+        notice.value = "本次操作未生成新版本。请修正提示信息后手动重试。";
+      } else notice.value = "可查询上次结果，避免重复发起模型调用。";
+      await refreshUsage();
       throw e;
     }
   });
@@ -482,6 +641,7 @@ async function checkPending() {
         version?: StudioVersion;
         became_current?: boolean;
         analysis?: AnalysisRow;
+        inspection?: InspectionRow;
       };
       error_code: string;
       workspace_id: string;
@@ -506,13 +666,22 @@ async function checkPending() {
         source.value = found.source_text;
         keep.value = found.keep_text;
         change.value = found.change_text;
-        imagePath.value = found.reference_path;
-        if (found.reference_path)
-          imagePreview.value = await signedImage(found.reference_path);
+        source.value = [
+          found.source_text,
+          found.change_text ? "需要修改：" + found.change_text : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n");
+        change.value = "";
+        intent.value = found.intent ?? "replicate";
+        templateId.value = found.template_id ?? "ecommerce";
+        await loadReferences(found);
         await loadVersions(
           request.result.version?.id || request.result.analysis?.version_id,
         );
         if (request.result.analysis) analysis.value = request.result.analysis;
+        if (request.result.inspection)
+          inspection.value = request.result.inspection;
       }
       notice.value = "上次结果已恢复。";
     } else {
@@ -533,9 +702,25 @@ async function restore() {
       versionId: workspace.value.current_version_id,
       restoreId: selected.value.id,
     });
-    source.value = String(data.version.context.source ?? "");
+    source.value = [
+      String(data.version.context.source ?? ""),
+      data.version.context.change
+        ? "需要修改：" + String(data.version.context.change)
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
     keep.value = String(data.version.context.keep ?? "");
-    change.value = String(data.version.context.change ?? "");
+    change.value = "";
+    intent.value = (data.version.context.intent ??
+      "replicate") as ReferenceIntent;
+    templateId.value = String(data.version.context.template_id ?? "ecommerce");
+    if (workspace.value && Array.isArray(data.version.context.reference_images))
+      await loadReferences({
+        ...workspace.value,
+        reference_images: data.version.context
+          .reference_images as ReferenceImage[],
+      });
     await acceptVersion(data);
     notice.value = "已恢复为新版本，历史版本仍保留。";
   });
@@ -543,14 +728,41 @@ async function restore() {
 async function copy() {
   await attempt(async () => {
     await navigator.clipboard.writeText(
-      outputTab.value === "zh"
-        ? draftZh.value
-        : outputTab.value === "en"
-          ? draftEn.value
-          : draftJson.value,
+      outputTab.value === "report"
+        ? reportText()
+        : outputTab.value === "zh"
+          ? draftZh.value
+          : outputTab.value === "en"
+            ? draftEn.value
+            : draftJson.value,
     );
     notice.value = "已复制。";
   });
+}
+function reportText() {
+  const r = selected.value?.bundle.report;
+  if (!r) return draftZh.value;
+  return [
+    "# @DONGWU 专业提炼报告",
+    r.intent,
+    "## 固定要素",
+    ...r.anchors.map((x) => x.title + "：" + x.content),
+    "## 重构要素",
+    ...r.changes.map((x) => x.title + "：" + x.content),
+    "## 专业结构",
+    ...r.sections.map((x) => x.title + "：" + x.content),
+    "## 中文提示词",
+    draftZh.value,
+    "## English prompt",
+    draftEn.value,
+    "## 负向提示词",
+    r.negative.zh,
+    r.negative.en,
+    "## 推荐参数",
+    ...r.parameters.map(
+      (x) => x.name + "：" + x.value + "（" + x.reason + "）",
+    ),
+  ].join("\n\n");
 }
 async function publish() {
   await attempt(async () => {
@@ -603,9 +815,16 @@ async function importLibrary(item: LibraryRow) {
     source.value = w.source_text;
     keep.value = w.keep_text;
     change.value = w.change_text;
-    imagePath.value = w.reference_path;
-    if (w.reference_path)
-      imagePreview.value = await signedImage(w.reference_path);
+    source.value = [
+      w.source_text,
+      w.change_text ? "需要修改：" + w.change_text : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    change.value = "";
+    intent.value = w.intent ?? "replicate";
+    templateId.value = w.template_id ?? "ecommerce";
+    await loadReferences(w);
     await loadVersions(data.version.id);
     notice.value = "已复制到私人空间，可以继续编辑。";
   });
@@ -711,15 +930,17 @@ onBeforeUnmount(() => {
   resetMemberPassword.value = "";
   password.value = "";
   authSubscription?.unsubscribe();
-  if (imagePreview.value.startsWith("blob:"))
-    URL.revokeObjectURL(imagePreview.value);
+  releasePreviews();
 });
 </script>
 
 <template>
   <div v-if="!db" class="gate">
     <div class="gate-card">
-      <span class="eyebrow">HiBREW / PROMPT STUDIO</span>
+      <img class="gate-avatar" :src="AVATAR_URL" alt="@DONGWU头像" /><span
+        class="eyebrow"
+        >@DONGWU / CREATIVE STUDIO</span
+      >
       <h1>团队工作室即将就绪</h1>
       <p>网站已构建。管理员连接团队后台后，即可邀请成员使用。</p>
       <a
@@ -732,7 +953,7 @@ onBeforeUnmount(() => {
   </div>
   <div v-else-if="!user" class="gate">
     <form class="gate-card" @submit.prevent="login">
-      <span class="eyebrow">HiBREW / PROMPT STUDIO</span>
+      <span class="eyebrow">@DONGWU / CREATIVE STUDIO</span>
       <h1>让好的画面，<br />成为可复用的提示词。</h1>
       <p>登录团队工作室，提炼参考图，打磨每一次表达。</p>
       <label
@@ -777,7 +998,9 @@ onBeforeUnmount(() => {
   <div v-else class="studio">
     <aside class="sidebar">
       <a class="brand" href="#" @click.prevent="navigate('reference')"
-        ><b>H</b><span>HiBREW<small>提示词工作室</small></span></a
+        ><img :src="AVATAR_URL" alt="@DONGWU头像" /><span
+          >@DONGWU<small>创作工作室</small></span
+        ></a
       >
       <span class="nav-label">创作空间</span>
       <nav aria-label="主要功能">
@@ -785,9 +1008,9 @@ onBeforeUnmount(() => {
           :class="{ active: page === 'reference' }"
           @click="navigate('reference')"
         >
-          <span>▧</span>参考图提炼<i>重点</i></button
+          <StudioIcon name="image" />参考图提炼<i>创作</i></button
         ><button :class="{ active: page === 'text' }" @click="navigate('text')">
-          <span>≋</span>文字提示词
+          <StudioIcon name="text" />文字提示词
         </button>
       </nav>
       <span class="nav-label">我的资产</span>
@@ -796,23 +1019,23 @@ onBeforeUnmount(() => {
           :class="{ active: page === 'history' }"
           @click="navigate('history')"
         >
-          历史与版本</button
+          <StudioIcon name="clock" />历史与版本</button
         ><button
           :class="{ active: page === 'favorites' }"
           @click="navigate('favorites')"
         >
-          我的收藏</button
+          <StudioIcon name="star" />我的收藏</button
         ><button
           :class="{ active: page === 'library' }"
           @click="navigate('library')"
         >
-          团队精品库</button
+          <StudioIcon name="grid" />团队精品库</button
         ><button
           v-if="member.role === 'admin'"
           :class="{ active: page === 'admin' }"
           @click="navigate('admin')"
         >
-          团队管理
+          <StudioIcon name="people" />团队管理
         </button>
       </nav>
       <div class="sidebar-bottom">
@@ -826,14 +1049,37 @@ onBeforeUnmount(() => {
     </aside>
     <main>
       <header class="topbar">
-        <span
-          >团队工作室
-          <span class="muted"
-            >/ {{ isEditor ? "创作" : "作品管理" }}</span
-          ></span
-        >
+        <span class="workspace-wordmark">@DONGWU</span>
+        <nav class="topnav" aria-label="顶部导航">
+          <button
+            :class="{ active: page === 'reference' }"
+            @click="navigate('reference')"
+          >
+            参考图创作</button
+          ><button
+            :class="{ active: page === 'text' }"
+            @click="navigate('text')"
+          >
+            文字创作</button
+          ><button
+            :class="{ active: page === 'history' }"
+            @click="navigate('history')"
+          >
+            历史资产</button
+          ><button
+            :class="{ active: page === 'library' }"
+            @click="navigate('library')"
+          >
+            团队精品
+          </button>
+        </nav>
         <div>
-          <span class="account">{{ member.email }}</span
+          <img
+            class="account-avatar"
+            :src="AVATAR_URL"
+            alt="@DONGWU头像"
+          /><span class="account"
+            ><b>@DONGWU</b><small>{{ member.email }}</small></span
           ><button class="quiet" :disabled="busy" @click="setPassword = true">
             修改密码</button
           ><button class="quiet" @click="logout">退出</button>
@@ -878,7 +1124,41 @@ onBeforeUnmount(() => {
                 }}
               </p>
             </div>
-            <button :disabled="busy" @click="newWork">＋ 新建作品</button>
+            <button class="new-work" :disabled="busy" @click="newWork">
+              <StudioIcon name="plus" />新建作品
+            </button>
+          </div>
+          <div class="workspace-overview">
+            <article class="overview-primary">
+              <StudioIcon name="spark" />
+              <div>
+                <span>创作空间</span
+                ><strong>{{
+                  mode === "reference"
+                    ? "让每张参考图，各司其职。"
+                    : "从模糊想法，到清晰表达。"
+                }}</strong>
+                <p>
+                  {{
+                    mode === "reference"
+                      ? "最多 5 张图片，明确主体、场景与风格的借用边界。"
+                      : "分析结构，补足约束，保留你的创作本意。"
+                  }}
+                </p>
+              </div>
+            </article>
+            <article>
+              <span>今日使用</span
+              ><strong
+                >{{ used }}<small> / {{ dailyLimit }}</small></strong
+              >
+              <p>团队共享模型 · 私人保存</p>
+            </article>
+            <article>
+              <span>我的创作资产</span
+              ><strong>{{ workspaces.length }}<small> 份</small></strong>
+              <p>历史、报告与每次版本都在</p>
+            </article>
           </div>
           <div class="editor-grid">
             <section class="panel input-panel">
@@ -898,40 +1178,68 @@ onBeforeUnmount(() => {
                   placeholder="给这次创作起个名字"
                   :disabled="busy"
               /></label>
-              <div v-if="mode === 'reference'" class="image-upload">
-                <img
-                  v-if="imagePreview"
-                  :src="imagePreview"
-                  alt="当前作品的原始参考图"
-                /><label v-if="!selected" class="upload-control"
-                  ><span>{{
-                    imagePreview ? "更换参考图" : "＋ 上传一张参考图"
-                  }}</span
-                  ><small>PNG / JPEG · 最大 10MB</small
-                  ><input
-                    type="file"
-                    accept="image/png,image/jpeg"
+              <ReferenceBoard
+                v-if="mode === 'reference'"
+                :images="images"
+                :busy="busy"
+                :locked="!!selected"
+                @change="chooseImage"
+                @remove="removeImage"
+                @move="moveImage"
+                @update="updateImage"
+              />
+              <div class="prompt-heading">
+                <span>提示词</span>
+                <div class="intent-controls">
+                  <button
+                    :class="{ active: intent === 'inspiration' }"
+                    :aria-pressed="intent === 'inspiration'"
                     :disabled="busy"
-                    @change="chooseImage" /></label
-                ><small v-else
-                  >原始参考图随作品保存。更换图片请新建作品。</small
-                >
+                    @click="
+                      intent = 'inspiration';
+                      inspirationOpen = true;
+                    "
+                  >
+                    <StudioIcon name="spark" />灵感</button
+                  ><button
+                    :class="{ active: intent === 'replicate' }"
+                    :aria-pressed="intent === 'replicate'"
+                    :disabled="busy"
+                    @click="intent = 'replicate'"
+                  >
+                    复刻</button
+                  ><button
+                    :class="{ active: intent === 'style' }"
+                    :aria-pressed="intent === 'style'"
+                    :disabled="busy"
+                    @click="intent = 'style'"
+                  >
+                    风格学习
+                  </button>
+                </div>
               </div>
-              <label
-                >{{
-                  mode === "reference" ? "补充说明（可选）" : "需要优化的文字"
-                }}<textarea
-                  v-model="source"
-                  :rows="mode === 'reference' ? 3 : 8"
-                  maxlength="16000"
-                  :disabled="busy"
-                  :placeholder="
-                    mode === 'reference'
-                      ? '例如：用于咖啡机产品展示，关注机位和灯光'
-                      : '粘贴原始提示词，或描述你希望完成的任务…'
-                  "
-                ></textarea>
-              </label>
+              <label class="sr-only" for="studio-prompt">提示词</label
+              ><textarea
+                id="studio-prompt"
+                v-model="source"
+                rows="7"
+                maxlength="32000"
+                :disabled="busy"
+                :placeholder="
+                  mode === 'reference'
+                    ? '例如：将图1白底产品放入图2风格的场景，借用桌面、背景和人物；图3提供人物动作。产品外观保持不变，匹配透视、光影、景深和大小。'
+                    : '写下原始提示词、任务目标、补充说明与需要修改的内容…'
+                "
+              ></textarea>
+              <p class="intent-description">
+                {{
+                  intent === "style"
+                    ? "保留你的主体，只学习指定参考图的风格、构图、色彩和光影。"
+                    : intent === "inspiration"
+                      ? "以你的意图为中心拓展方案，明确区分图中事实和新增创意。"
+                      : "忠实复现；如需多图重构，请明确每张图要借用的内容。"
+                }}
+              </p>
               <label
                 >需要保留<textarea
                   v-model="keep"
@@ -942,37 +1250,59 @@ onBeforeUnmount(() => {
                 ></textarea>
               </label>
               <label
-                >需要修改<textarea
-                  v-model="change"
-                  rows="3"
-                  maxlength="8000"
-                  :disabled="busy"
-                  placeholder="例如：主体换成银色咖啡机，桌面改为浅色石材"
-                ></textarea>
-              </label>
-              <button
-                class="primary full"
-                :disabled="busy || !configured"
-                @click="
-                  run(
-                    mode === 'text'
-                      ? 'text.optimize'
-                      : selected
-                        ? 'reference.rewrite'
-                        : 'reference.extract',
-                  )
-                "
+                >优化模板<select v-model="templateId" :disabled="busy">
+                  <option
+                    v-for="item in STUDIO_TEMPLATES"
+                    :key="item.id"
+                    :value="item.id"
+                  >
+                    {{ item.name }}
+                  </option>
+                </select></label
               >
+              <p class="template-description">
                 {{
-                  busy
-                    ? "正在处理并保存…"
-                    : mode === "text"
-                      ? "优化并提炼"
-                      : selected
-                        ? "按要求生成新版本"
-                        : "提炼参考图提示词"
-                }}</button
-              ><small class="hint">结果自动保存。单次处理最长约 2 分钟。</small>
+                  STUDIO_TEMPLATES.find((item) => item.id === templateId)
+                    ?.description
+                }}
+              </p>
+              <div class="input-actions">
+                <button
+                  class="analyze-input"
+                  :disabled="busy || !configured"
+                  @click="run('prompt.inspect')"
+                >
+                  <StudioIcon name="chart" />{{
+                    mode === "reference" ? "分析原文与参考图" : "分析原文"
+                  }}
+                </button>
+                <button
+                  class="primary full"
+                  :disabled="busy || !configured"
+                  @click="
+                    run(
+                      mode === 'text'
+                        ? 'text.optimize'
+                        : selected
+                          ? 'reference.rewrite'
+                          : 'reference.extract',
+                    )
+                  "
+                >
+                  {{
+                    busy
+                      ? "正在处理并保存…"
+                      : mode === "text"
+                        ? "优化并提炼"
+                        : selected
+                          ? "按要求生成新版本"
+                          : "提炼参考图提示词"
+                  }}
+                </button>
+              </div>
+              <small class="hint"
+                >结果自动保存 · 分析与优化分别计次 · 单次最长约 2 分钟</small
+              >
             </section>
             <section class="panel result-panel">
               <div class="panel-head">
@@ -985,24 +1315,59 @@ onBeforeUnmount(() => {
                 <span class="empty-symbol">⌘</span>
                 <h3>好的提示词，从看清细节开始</h3>
                 <p>
-                  完成左侧输入后，这里会生成中文、英文及结构化结果。<br />之后可以分析、修改，并保留每次版本。
+                  先分析原文与参考图，再生成完整专业报告。<br />包含中英提示词、图间映射、固定要素、结构、负向约束与参数建议。
                 </p>
               </div>
               <template v-else
                 ><div class="result-toolbar">
                   <div class="tabs" role="tablist" aria-label="结果格式">
                     <button
-                      v-for="tab in ['zh', 'en', 'json'] as const"
+                      v-for="tab in ['report', 'zh', 'en', 'json'] as const"
                       :key="tab"
                       role="tab"
                       :aria-selected="outputTab === tab"
                       :class="{ active: outputTab === tab }"
                       @click="outputTab = tab"
                     >
-                      {{ { zh: "中文", en: "English", json: "JSON" }[tab] }}
+                      {{
+                        {
+                          report: "专业报告",
+                          zh: "中文",
+                          en: "English",
+                          json: "JSON",
+                        }[tab]
+                      }}
                     </button>
                   </div>
                   <button :disabled="busy" @click="copy">复制</button>
+                </div>
+                <div v-if="outputTab === 'report'" class="report-view">
+                  <ProfessionalReportView
+                    v-if="selected.bundle.report"
+                    :report="selected.bundle.report"
+                    :zh="draftZh"
+                    :en="draftEn"
+                  />
+                  <div class="legacy-report" v-else>
+                    <StudioIcon name="chart" />
+                    <h3>这份成果还没有专业报告</h3>
+                    <p>
+                      中英提示词、JSON
+                      和历史分析仍可查看。重新提炼会生成包含要素对照、专业结构、负向提示词和参数建议的完整新报告。
+                    </p>
+                    <button
+                      :disabled="busy"
+                      @click="
+                        run(
+                          mode === 'reference'
+                            ? 'reference.rewrite'
+                            : 'text.optimize',
+                        )
+                      "
+                    >
+                      生成专业报告新版本
+                    </button>
+                  </div>
                 </div>
                 <textarea
                   v-show="outputTab === 'zh'"
@@ -1148,48 +1513,40 @@ onBeforeUnmount(() => {
               </template>
             </section>
           </div>
-          <section v-if="analysis" class="panel analysis-panel">
-            <div class="panel-head">
-              <h2>03 <span>质量分析与修改建议</span></h2>
-              <span class="score"
-                >{{ analysis.result.score }}<small>/100</small></span
-              >
-            </div>
-            <p>{{ analysis.result.summary }}</p>
-            <p v-if="analysisStale" class="error">
-              版本或需求已变化，请重新分析后再应用建议。
-            </p>
-            <div class="dimensions">
-              <div v-for="d in analysis.result.dimensions" :key="d.name">
-                <strong
-                  >{{ d.name }}<span>{{ d.score }}</span></strong
-                >
-                <p>{{ d.reason }}</p>
-              </div>
-            </div>
-            <div class="suggestions">
-              <article v-for="s in analysis.result.suggestions" :key="s.id">
-                <div>
-                  <h3>{{ s.title }}</h3>
-                  <p>{{ s.reason }}</p>
-                  <small>{{ s.instruction }}</small>
-                </div>
-                <button
-                  :disabled="busy || analysisStale"
-                  @click="
-                    run(
-                      mode === 'reference'
-                        ? 'reference.rewrite'
-                        : 'text.optimize',
-                      s.id,
-                    )
-                  "
-                >
-                  按此建议生成新版本
-                </button>
-              </article>
-            </div>
-          </section>
+          <AnalysisPanel
+            v-if="inspection"
+            :result="inspection.result"
+            title="原文与参考图结构分析"
+            :stale="inspectionStale"
+            :busy="busy"
+            input
+            @apply="
+              (id) =>
+                run(
+                  mode === 'text'
+                    ? 'text.optimize'
+                    : selected
+                      ? 'reference.rewrite'
+                      : 'reference.extract',
+                  id,
+                  true,
+                )
+            "
+          />
+          <AnalysisPanel
+            v-if="analysis"
+            :result="analysis.result"
+            title="质量分析与修改建议"
+            :stale="analysisStale"
+            :busy="busy"
+            @apply="
+              (id) =>
+                run(
+                  mode === 'reference' ? 'reference.rewrite' : 'text.optimize',
+                  id,
+                )
+            "
+          />
         </template>
         <template
           v-else-if="
@@ -1423,10 +1780,51 @@ onBeforeUnmount(() => {
         >
       </div>
       <footer>
-        HiBREW Prompt Studio · 团队提示词资产 ·
+        @DONGWU 创作工作室 · 团队提示词资产 ·
         <a :href="SOURCE_URL" target="_blank" rel="noopener">查看源码</a>
       </footer>
     </main>
+    <div
+      v-if="inspirationOpen"
+      class="modal-backdrop"
+      @click.self="inspirationOpen = false"
+    >
+      <section
+        class="modal inspiration-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="找点灵感"
+      >
+        <div class="panel-head">
+          <div>
+            <span class="eyebrow">A LITTLE INSPIRATION</span>
+            <h2>从一个好想法开始</h2>
+          </div>
+          <button @click="inspirationOpen = false" aria-label="关闭灵感">
+            ×
+          </button>
+        </div>
+        <p>
+          选择一个方向补充到现有提示词，再结合参考图调整。也可以直接使用当前提示词探索灵感；不会自动调用模型。
+        </p>
+        <button class="primary" @click="inspirationOpen = false">
+          使用当前提示词探索灵感
+        </button>
+        <div class="inspiration-grid">
+          <article
+            v-for="(item, index) in STUDIO_INSPIRATIONS"
+            :key="item.title"
+          >
+            <span class="tag">{{ item.category }}</span>
+            <h3>{{ item.title }}</h3>
+            <p>{{ item.prompt }}</p>
+            <button @click="useInspiration(index)">
+              带入提示词 <StudioIcon name="arrow" />
+            </button>
+          </article>
+        </div>
+      </section>
+    </div>
     <div v-if="publishOpen" class="modal-backdrop">
       <section
         role="dialog"

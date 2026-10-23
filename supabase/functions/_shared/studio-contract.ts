@@ -1,6 +1,7 @@
 /** Portable contract shared by the team UI, Edge Function and transport tests. */
 export type StudioMode = "text" | "reference";
 export type AiAction =
+  | "prompt.inspect"
   | "text.optimize"
   | "reference.extract"
   | "reference.rewrite"
@@ -11,6 +12,48 @@ export interface PromptBundle {
   structured: Record<string, unknown>;
   observations: string[];
   uncertainties: string[];
+  report?: ProfessionalReport;
+}
+export type ReferenceRole =
+  | "auto"
+  | "product"
+  | "scene"
+  | "person"
+  | "style"
+  | "detail";
+export interface ReferenceImage {
+  path: string;
+  role: ReferenceRole;
+  note: string;
+}
+export type ReferenceIntent = "replicate" | "style" | "inspiration";
+export const TEMPLATE_IDS = [
+  "ecommerce",
+  "photography",
+  "identity",
+  "multiimage",
+  "lighting",
+  "structured",
+  "general",
+] as const;
+export interface ReportItem {
+  title: string;
+  content: string;
+}
+export interface ProfessionalReport {
+  intent: string;
+  imageRoles: Array<{
+    index: number;
+    role: string;
+    evidence: string;
+    use: string;
+  }>;
+  anchors: ReportItem[];
+  changes: ReportItem[];
+  sections: ReportItem[];
+  negative: { zh: string; en: string };
+  parameters: Array<{ name: string; value: string; reason: string }>;
+  checks: string[];
 }
 export interface PromptAnalysis {
   score: number;
@@ -22,6 +65,10 @@ export interface PromptAnalysis {
     instruction: string;
     reason: string;
   }>;
+  structure?: ReportItem[];
+  anchors?: ReportItem[];
+  conflicts?: string[];
+  imageRoles?: ProfessionalReport["imageRoles"];
 }
 export interface StudioWorkspace {
   id: string;
@@ -32,6 +79,9 @@ export interface StudioWorkspace {
   keep_text: string;
   change_text: string;
   reference_path: string | null;
+  reference_images?: ReferenceImage[];
+  intent?: ReferenceIntent;
+  template_id?: string;
   current_version_id: string | null;
   favorite: boolean;
 }
@@ -54,12 +104,15 @@ export class StudioError extends Error {
   }
 }
 export const AI_ACTIONS: AiAction[] = [
+  "prompt.inspect",
   "text.optimize",
   "reference.extract",
   "reference.rewrite",
   "prompt.evaluate",
 ];
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const MAX_REFERENCE_IMAGES = 5;
+export const MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
 export const REQUEST_TIMEOUT_MS = 120_000;
 export const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -114,13 +167,19 @@ export function normalizeBundle(value: unknown): PromptBundle {
     JSON.stringify(value.structured).length > 40_000
   )
     throw new StudioError("INVALID_MODEL_OUTPUT", 502);
-  return {
+  const bundle: PromptBundle = {
     zh: value.zh.trim(),
     en: value.en.trim(),
     structured: value.structured,
     observations: list(value.observations),
     uncertainties: list(value.uncertainties),
+    ...(value.report === undefined
+      ? {}
+      : { report: normalizeReport(value.report) }),
   };
+  if (new TextEncoder().encode(JSON.stringify(bundle)).byteLength > 115000)
+    throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+  return bundle;
 }
 export function normalizeAnalysis(value: unknown): PromptAnalysis {
   const score = (s: unknown) =>
@@ -172,7 +231,152 @@ export function normalizeAnalysis(value: unknown): PromptAnalysis {
     summary: value.summary,
     dimensions,
     suggestions,
+    ...(value.structure === undefined
+      ? {}
+      : { structure: reportItems(value.structure) }),
+    ...(value.anchors === undefined
+      ? {}
+      : { anchors: reportItems(value.anchors) }),
+    ...(value.conflicts === undefined
+      ? {}
+      : { conflicts: list(value.conflicts) }),
+    ...(value.imageRoles === undefined
+      ? {}
+      : { imageRoles: imageRoles(value.imageRoles) }),
   };
+}
+
+function reportItems(value: unknown): ReportItem[] {
+  if (!Array.isArray(value) || value.length > 16)
+    throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+  return value.map((item) => {
+    if (
+      !record(item) ||
+      typeof item.title !== "string" ||
+      typeof item.content !== "string" ||
+      item.title.length > 160 ||
+      item.content.length > 4000
+    )
+      throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+    return { title: item.title, content: item.content };
+  });
+}
+function imageRoles(value: unknown): ProfessionalReport["imageRoles"] {
+  if (!Array.isArray(value) || value.length > MAX_REFERENCE_IMAGES)
+    throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+  const seen = new Set<number>();
+  return value.map((item) => {
+    if (
+      !record(item) ||
+      !Number.isInteger(item.index) ||
+      Number(item.index) < 1 ||
+      Number(item.index) > 5 ||
+      seen.has(Number(item.index))
+    )
+      throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+    seen.add(Number(item.index));
+    for (const key of ["role", "evidence", "use"])
+      if (typeof item[key] !== "string" || (item[key] as string).length > 3000)
+        throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+    return {
+      index: Number(item.index),
+      role: item.role as string,
+      evidence: item.evidence as string,
+      use: item.use as string,
+    };
+  });
+}
+export function normalizeReport(value: unknown): ProfessionalReport {
+  if (
+    !record(value) ||
+    typeof value.intent !== "string" ||
+    value.intent.length > 4000 ||
+    !record(value.negative) ||
+    typeof value.negative.zh !== "string" ||
+    typeof value.negative.en !== "string" ||
+    value.negative.zh.length > 4000 ||
+    value.negative.en.length > 4000 ||
+    !Array.isArray(value.parameters) ||
+    value.parameters.length > 12
+  )
+    throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+  const parameters = value.parameters.map((item) => {
+    if (
+      !record(item) ||
+      ["name", "value", "reason"].some(
+        (key) =>
+          typeof item[key] !== "string" || (item[key] as string).length > 2000,
+      )
+    )
+      throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+    return {
+      name: item.name as string,
+      value: item.value as string,
+      reason: item.reason as string,
+    };
+  });
+  return {
+    intent: value.intent,
+    imageRoles: imageRoles(value.imageRoles),
+    anchors: reportItems(value.anchors),
+    changes: reportItems(value.changes),
+    sections: reportItems(value.sections),
+    negative: { zh: value.negative.zh, en: value.negative.en },
+    parameters,
+    checks: list(value.checks),
+  };
+}
+export function normalizeReferences(
+  value: unknown,
+  user: string,
+): ReferenceImage[] {
+  if (!Array.isArray(value) || value.length > MAX_REFERENCE_IMAGES)
+    throw new StudioError("INVALID_REFERENCE_IMAGES");
+  const seen = new Set<string>();
+  return value.map((item) => {
+    if (
+      !record(item) ||
+      !ownsImage(item.path, user) ||
+      seen.has(item.path) ||
+      !["auto", "product", "scene", "person", "style", "detail"].includes(
+        String(item.role),
+      )
+    )
+      throw new StudioError("INVALID_REFERENCE_IMAGES");
+    seen.add(item.path);
+    return {
+      path: item.path,
+      role: item.role as ReferenceRole,
+      note: limitedText(item.note, 1000),
+    };
+  });
+}
+export function workspaceReferences(
+  workspace: StudioWorkspace,
+): ReferenceImage[] {
+  return workspace.reference_images?.length
+    ? workspace.reference_images
+    : workspace.reference_path
+      ? [{ path: workspace.reference_path, role: "auto", note: "" }]
+      : [];
+}
+export function workspaceContext(workspace: StudioWorkspace) {
+  return {
+    source: workspace.source_text,
+    keep: workspace.keep_text,
+    change: workspace.change_text,
+    reference_path: workspace.reference_path,
+    reference_images: workspaceReferences(workspace),
+    intent: workspace.intent ?? "replicate",
+    template_id: workspace.template_id ?? "ecommerce",
+  };
+}
+export function validateReferenceMentions(text: string, count: number) {
+  for (const match of text.matchAll(/(?:图\s*|\bimage\s*)(\d+)/gi)) {
+    const index = Number(match[1]);
+    if (index < 1 || index > count)
+      throw new StudioError("REFERENCE_INDEX_MISSING");
+  }
 }
 export function ownsImage(path: unknown, userId: string): path is string {
   return (

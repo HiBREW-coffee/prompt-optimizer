@@ -1,10 +1,16 @@
-# HiBREW 提示词工作室：免费团队版
+# @DONGWU 创作工作室：免费团队版
 
 代码托管在 GitHub，前端使用 Cloudflare Pages Free，后台复用 Supabase Free。应用不设置试用到期日，不自动升级付费。模型调用仍消耗公司 LK888 额度。免费服务有平台用量限制；Supabase 低活跃项目可能暂停，恢复项目后即可继续使用。
 
 ## 功能
 
-独立构建只包含文字优化、单张参考图提炼与受控改写，默认进入参考图提炼。输出中文、英文和 JSON；分析读取原图、当前版本、保留与修改要求，提供评分和可应用的建议。手动编辑、恢复和建议修改都追加版本，不覆盖旧记录。包含私人云端历史、收藏、导出、主动发布/撤回的团队精品库。不包含图像生成、MCP 或用户模型密钥设置。
+独立构建只包含文字优化、最多五张参考图的专业提炼与受控改写，默认进入参考图提炼。品牌、头像和站点图标统一为 @DONGWU。支持灵感卡、复刻、风格学习及七种原项目优化模板。
+
+“提示词”合并原补充说明与修改要求，“需要保留”独立。图1～图5按顺序编号，可设置产品、场景、人物、风格或细节用途；模型接收每张图的编号、图像和用途。引用不存在的图号会在付费请求前阻止。单张 PNG/JPEG 最大 10MB，处理后全部图像合计最大 20MB。
+
+可在生成前分析原文与全部参考图的结构、歧义、固定要素和修改建议，再应用建议优化。生成后仍有独立的成果评分与建议。成果包含完整中文、英文、JSON、图间职责、固定/可变要素、专业结构拆解、负向提示词、参数建议及验收清单。不完整专业报告不保存为成功版本。
+
+手动编辑、恢复和建议修改都追加版本，不覆盖旧记录。旧单图作品与旧报告仍可读取；历史成果可主动再生成完整专业报告。包含私人云端历史、收藏、导出、主动发布/撤回的团队精品库。不包含图像生成、MCP 或用户模型密钥设置。默认分享仅含中英及 JSON 提示词；专业报告、原文分析和私人要求不一并发布。分享全部参考图仍需明确勾选。
 
 ## 1. 部署前检查现有 Supabase 项目
 
@@ -20,6 +26,8 @@ select policyname,roles,cmd,permissive,qual,with_check from pg_policies where sc
 若已有 `ps_*` 表或 `prompt-studio-references` 存储桶，先核对来源，不覆盖。迁移创建隔离的表、函数和私有桶。存储的 restrictive guard 防止已有 permissive 规则放开本桶，其他桶保持原有规则。不改变全项目注册、邮件或现有函数配置。
 
 在 SQL Editor 运行 `supabase/migrations/202610230001_prompt_studio.sql` 一次。迁移使用事务，失败会回滚；不要反复执行或自动删除冲突对象。
+
+已部署首版的项目只运行新增的 `202610230002_dongwu_studio.sql`，不要重跑首版迁移。新项目按文件顺序执行两份。新增迁移回填旧单图列表，创建隔离的原文分析表并扩展版本恢复和分享图片权限。先完成迁移、后台函数更新，再发布新前端。
 
 ## 2. 发布 Supabase 函数
 
@@ -41,11 +49,11 @@ supabase functions deploy prompt-studio-api --project-ref YOUR_PROJECT_REF
 
 由项目所有者直接在 Supabase Secrets 添加以下设置，**不要把模型 Key 发到聊天、GitHub 或前端**：
 
-| 设置 | 用途 |
-| --- | --- |
-| `PS_LK888_API_KEY` | 公司 LK888 Key，只在函数内使用 |
-| `PS_LK888_MODEL` | 默认 `gem-3.8-flash`，需账户支持图片理解 |
-| `PS_APP_URL` | 最终 Cloudflare Pages HTTPS 根地址 |
+| 设置                 | 用途                                            |
+| -------------------- | ----------------------------------------------- |
+| `PS_LK888_API_KEY`   | 公司 LK888 Key，只在函数内使用                  |
+| `PS_LK888_MODEL`     | 默认 `gem-3.8-flash`，需账户支持图片理解        |
+| `PS_APP_URL`         | 最终 Cloudflare Pages HTTPS 根地址              |
 | `PS_ALLOWED_ORIGINS` | 允许的网站 origin，以英文逗号分隔；不使用通配符 |
 
 `SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 由运行平台提供，绝不复制到前端。服务器固定访问 `https://api.lk888.ai`。只在流式路由 HTTP 404/405/501 且未读取任何响应块时，保留相同输入回退一次 `generateContent`；其他失败不重试。同一次操作合计 120 秒，包括身份验证、下载图、流式及非流式回退。中断不自动重放，可按请求 ID 查询完成结果。
@@ -54,15 +62,15 @@ supabase functions deploy prompt-studio-api --project-ref YOUR_PROJECT_REF
 
 在 Cloudflare 的 Workers & Pages 中选择 **Pages → Connect to Git**，连接 `HiBREW-coffee/prompt-optimizer`，选择分支 `feature/prompt-studio-design-templates-v1`。首版验证完成后再让团队正式使用。
 
-| 配置 | 值 |
-| --- | --- |
-| Framework | Vue / None（使用下列显式配置） |
-| Root directory | 仓库根目录 |
-| Build command | `pnpm build:team` |
-| Build output directory | `packages/web/dist-team` |
-| `NODE_VERSION` | `24.22.1`（必须填写完整版本） |
-| `PNPM_VERSION` | `10.6.1` |
-| `VITE_TEAM_SUPABASE_URL` | Supabase 项目公开 HTTPS URL |
+| 配置                          | 值                                                                     |
+| ----------------------------- | ---------------------------------------------------------------------- |
+| Framework                     | Vue / None（使用下列显式配置）                                         |
+| Root directory                | 仓库根目录                                                             |
+| Build command                 | `pnpm build:team`                                                      |
+| Build output directory        | `packages/web/dist-team`                                               |
+| `NODE_VERSION`                | `24.22.1`（必须填写完整版本）                                          |
+| `PNPM_VERSION`                | `10.6.1`                                                               |
+| `VITE_TEAM_SUPABASE_URL`      | Supabase 项目公开 HTTPS URL                                            |
 | `VITE_TEAM_SUPABASE_ANON_KEY` | Supabase **publishable / anon 公共客户端值**，必须由所有者在平台内填写 |
 
 不要填写模型 Key、`service_role` 或 `sb_secret_*`。构建会拒绝服务器密钥作为客户端配置。本构建不加载原应用的 `.env` 或其他 `VITE_*` 模型配置。首次发布得到 `pages.dev` 地址后填回 `PS_APP_URL` 和 `PS_ALLOWED_ORIGINS`；在 Supabase Auth 的 Redirect URLs 添加这个确切根地址，不改其他应用的 Site URL 或已有跳转列表。预览地址默认不能调用后台，需明确加入允许列表才可使用。
@@ -94,7 +102,7 @@ select id,email,'admin' from auth.users where email='YOUR_ADMIN_EMAIL';
 
 - 每人每天 50 次、团队 200 次；个人同时 1 项、团队同时 2 项。可在团队管理调整；按北京时间每日重置。已接收的失败请求也占次数，因为上游可能已经计费。回退仍为一次操作。
 - 私人作品和图像只对所属成员可见。团队库保存提示词快照，默认不共享原图或私人原始需求；只有明确勾选才授权团队读图。撤回后旧签名链接最长仍可用 60 秒。
-- 图片只接受 PNG/JPEG、10MB 以内；浏览器重编码并缩放至长边 2048px，去除元数据；服务器验证文件签名。原始高分辨率文件请保留在自己的资料库。
+- 图片只接受 PNG/JPEG、单张 10MB 以内、最多五张；浏览器重编码并缩放至长边 2048px，去除元数据；服务器验证文件签名和全部图像 20MB 上限。原始高分辨率文件请保留在自己的资料库。已生成版本的图片顺序不可直接替换，添加或调整顺序请新建作品；用途说明可以修改，旧分析会失效。
 - 修改建议绑定被分析版本和需求，输入变化后必须重新分析。多标签同时编辑时，后到结果保存为分支，不替换当前版本。恢复旧版本会产生新版本。
 - 后续改写以当前完整版本为基线，提示词明确禁止无关精简或细节遗漏。参考图改写与建议应用若丢失已有 JSON 字段，后台拒绝保存并明确提示，不自动重复付费调用；语义细节可通过保留的版本对比核验。
 - 导出包含本人的提示词、版本和分析，排除会话、服务配置、邀请、图片签名链接和密钥；图片文件暂不包含在导出中。应用无自动备份承诺，可定期导出并另行使用平台备份机制。

@@ -7,6 +7,10 @@ import {
   record,
   requireId,
   stableJson,
+  normalizeReferences,
+  workspaceReferences,
+  workspaceContext,
+  TEMPLATE_IDS,
 } from "./studio-contract.ts";
 import type { StudioVersion, StudioWorkspace } from "./studio-contract.ts";
 import type { StudioStore } from "./studio-handler.ts";
@@ -96,16 +100,19 @@ export class SupabaseStudioStore implements StudioStore {
   async suggestion(
     user: string,
     analysisId: string,
-    versionId: string,
+    versionId: string | null,
     suggestionId: string,
     context: unknown,
+    workspaceId?: string,
   ) {
-    const { data, error } = await this.db
-      .from("ps_analyses")
-      .select("version_id,result,context")
-      .eq("id", analysisId)
-      .eq("version_id", versionId)
-      .maybeSingle();
+    let query = this.db
+      .from(versionId ? "ps_analyses" : "ps_inspections")
+      .select("result,context")
+      .eq("id", analysisId);
+    query = versionId
+      ? query.eq("version_id", versionId)
+      : query.eq("workspace_id", workspaceId).eq("owner_id", user);
+    const { data, error } = await query.maybeSingle();
     check(error);
     if (!data || stableJson(data.context) !== stableJson(context))
       throw new StudioError("STALE_ANALYSIS", 409);
@@ -130,12 +137,7 @@ export class SupabaseStudioStore implements StudioStore {
       p_workspace: workspace.id,
       p_parent: parent,
       p_bundle: bundle,
-      p_context: {
-        source: workspace.source_text,
-        keep: workspace.keep_text,
-        change: workspace.change_text,
-        reference_path: workspace.reference_path,
-      },
+      p_context: workspaceContext(workspace),
       p_kind: kind,
       p_request: request ?? null,
     });
@@ -172,6 +174,23 @@ export class SupabaseStudioStore implements StudioStore {
       .eq("owner_id", user)
       .eq("status", "running");
     check(error);
+  }
+  async inspect(
+    user: string,
+    workspace: string,
+    result: unknown,
+    context: unknown,
+    request: string,
+  ) {
+    const { data, error } = await this.db.rpc("ps_complete_inspection", {
+      p_user: user,
+      p_workspace: workspace,
+      p_result: result,
+      p_context: context,
+      p_request: request,
+    });
+    check(error);
+    return data;
   }
   async command(
     user: string,
@@ -210,15 +229,32 @@ export class SupabaseStudioStore implements StudioStore {
       const mode = body.mode;
       if (mode !== "text" && mode !== "reference")
         throw new StudioError("INVALID_ACTION");
-      const path = body.referencePath ?? null;
-      if (path !== null && !ownsImage(path, user))
-        throw new StudioError("INVALID_IMAGE");
+      const references = normalizeReferences(
+        body.referenceImages ??
+          (body.referencePath
+            ? [{ path: body.referencePath, role: "auto", note: "" }]
+            : []),
+        user,
+      );
+      if (mode === "text" && references.length)
+        throw new StudioError("INVALID_REFERENCE_IMAGES");
+      const path = references[0]?.path ?? null;
+      const intent = body.intent ?? "replicate";
+      const template = body.templateId ?? "ecommerce";
+      if (
+        !["replicate", "style", "inspiration"].includes(String(intent)) ||
+        !TEMPLATE_IDS.includes(template as (typeof TEMPLATE_IDS)[number])
+      )
+        throw new StudioError("INVALID_REQUEST");
       const changes = {
         title: limitedText(body.title, 120) || "未命名提示词",
-        source_text: limitedText(body.sourceText),
+        source_text: limitedText(body.sourceText, 32000),
         keep_text: limitedText(body.keepText, 8000),
         change_text: limitedText(body.changeText, 8000),
         reference_path: path,
+        reference_images: references,
+        intent,
+        template_id: template,
         mode,
         updated_at: new Date().toISOString(),
       };
@@ -226,7 +262,9 @@ export class SupabaseStudioStore implements StudioStore {
         const w = await this.workspace(user, requireId(body.workspaceId));
         if (
           w.mode !== mode ||
-          (w.current_version_id && w.reference_path !== path)
+          (w.current_version_id &&
+            stableJson(workspaceReferences(w).map((image) => image.path)) !==
+              stableJson(references.map((image) => image.path)))
         )
           throw new StudioError("REFERENCE_LOCKED", 409);
         const { data, error } = await this.db
@@ -272,6 +310,12 @@ export class SupabaseStudioStore implements StudioStore {
           source_text: String(context.source ?? ""),
           keep_text: String(context.keep ?? ""),
           change_text: String(context.change ?? ""),
+          intent: String(
+            context.intent ?? w.intent ?? "replicate",
+          ) as StudioWorkspace["intent"],
+          template_id: String(
+            context.template_id ?? w.template_id ?? "ecommerce",
+          ),
         };
         return await this.save(
           user,
@@ -299,7 +343,13 @@ export class SupabaseStudioStore implements StudioStore {
           owner_id: user,
           title: w.title,
           mode: w.mode,
-          bundle: v.bundle,
+          bundle: {
+            zh: v.bundle.zh,
+            en: v.bundle.en,
+            structured: v.bundle.structured,
+            observations: [],
+            uncertainties: [],
+          },
           context: {
             source: v.bundle.zh,
             keep: "",
@@ -307,6 +357,13 @@ export class SupabaseStudioStore implements StudioStore {
             reference_path: null,
           },
           reference_path: includeImage ? w.reference_path : null,
+          reference_images: includeImage
+            ? workspaceReferences(w).map((image) => ({
+                path: image.path,
+                role: image.role,
+                note: "",
+              }))
+            : [],
         })
         .select()
         .single();
@@ -329,14 +386,16 @@ export class SupabaseStudioStore implements StudioStore {
         .eq("id", requireId(body.libraryId))
         .single();
       check(error);
-      let path: string | null = null;
-      if (item.reference_path) {
-        path = `${user}/${crypto.randomUUID()}.${item.reference_path.endsWith(".png") ? "png" : "jpg"}`;
+      const references = [];
+      for (const reference of workspaceReferences(item)) {
+        const path = `${user}/${crypto.randomUUID()}.${reference.path.endsWith(".png") ? "png" : "jpg"}`;
         const copied = await this.db.storage
           .from(BUCKET)
-          .copy(item.reference_path, path);
+          .copy(reference.path, path);
         check(copied.error);
+        references.push({ path, role: reference.role, note: "" });
       }
+      const path = references[0]?.path ?? null;
       const { data: w, error: created } = await this.db
         .from("ps_workspaces")
         .insert({
@@ -347,6 +406,9 @@ export class SupabaseStudioStore implements StudioStore {
           keep_text: String(item.context.keep ?? ""),
           change_text: String(item.context.change ?? ""),
           reference_path: path,
+          reference_images: references,
+          intent: "replicate",
+          template_id: "ecommerce",
         })
         .select()
         .single();

@@ -10,6 +10,9 @@ export type {
   PromptBundle,
   PromptAnalysis,
   StudioMode,
+  ReferenceImage,
+  ReferenceIntent,
+  ProfessionalReport,
 } from "../../../supabase/functions/_shared/studio-contract";
 const url = import.meta.env.VITE_TEAM_SUPABASE_URL;
 const publicKey = import.meta.env.VITE_TEAM_SUPABASE_ANON_KEY;
@@ -39,9 +42,21 @@ export type LibraryRow = {
   mode: string;
   bundle: StudioVersion["bundle"];
   reference_path: string | null;
+  reference_images?: import("../../../supabase/functions/_shared/studio-contract").ReferenceImage[];
   created_at: string;
 };
+export type InspectionRow = Omit<AnalysisRow, "version_id"> & {
+  workspace_id: string;
+  owner_id: string;
+};
 const errors: Record<string, string> = {
+  INCOMPLETE_PROFESSIONAL_REPORT:
+    "模型未返回完整的专业报告，本次没有保存不完整版本。请稍后手动重试。",
+  INVALID_REFERENCE_IMAGES:
+    "最多上传 5 张 PNG / JPEG 图片，图片不能重复且必须属于你的私人空间。",
+  REFERENCE_INDEX_MISSING:
+    "提示词引用了未上传的图片编号。请检查图1～图5与当前图片是否对应。",
+  IMAGES_TOO_LARGE: "图片处理后合计超过 20MB，请压缩图片后再试。",
   NOT_MEMBER: "此账号尚未加入团队，请联系管理员邀请。",
   UNAUTHENTICATED: "登录已过期，请重新登录。",
   FORBIDDEN: "此操作仅管理员可用。",
@@ -183,28 +198,49 @@ export function download(
   URL.revokeObjectURL(url);
 }
 export async function exportPrivateData() {
-  const [workspaces, versions, analyses] = await Promise.all([
+  const [workspaces, versions, analyses, inspections] = await Promise.all([
     rows<StudioWorkspace>("ps_workspaces"),
     rows<StudioVersion>("ps_versions"),
     rows<AnalysisRow>("ps_analyses"),
+    rows<InspectionRow>("ps_inspections"),
   ]);
   download(
     "prompt-studio-export.json",
     JSON.stringify(
       {
-        schemaVersion: 1,
+        schemaVersion: 2,
         exportedAt: new Date().toISOString(),
-        workspaces: workspaces.map(({ reference_path, ...w }) => ({
-          ...w,
-          hasReference: Boolean(reference_path),
-        })),
+        workspaces: workspaces.map(
+          ({ reference_path, reference_images, ...w }) => ({
+            ...w,
+            hasReference: Boolean(reference_path),
+            referenceCount:
+              reference_images?.length || (reference_path ? 1 : 0),
+          }),
+        ),
         versions: versions.map((v) => ({
           ...v,
-          context: { ...v.context, reference_path: undefined },
+          context: {
+            ...v.context,
+            reference_path: undefined,
+            reference_images: undefined,
+          },
         })),
         analyses: analyses.map((a) => ({
           ...a,
-          context: { ...a.context, reference_path: undefined },
+          context: {
+            ...a.context,
+            reference_path: undefined,
+            reference_images: undefined,
+          },
+        })),
+        inspections: inspections.map((a) => ({
+          ...a,
+          context: {
+            ...a.context,
+            reference_path: undefined,
+            reference_images: undefined,
+          },
         })),
       },
       null,

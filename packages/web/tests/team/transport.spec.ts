@@ -22,6 +22,37 @@ function sse(...texts: string[]) {
   );
 }
 describe("fixed LK888 team transport", () => {
+  it("keeps image numbering and byte payloads unchanged when five-image streaming falls back", async () => {
+    const images = Array.from({ length: 5 }, (_, i) => ({
+      index: i + 1,
+      data: btoa(`image-${i + 1}`),
+      mimeType: "image/png",
+    }));
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response("", { status: 405 }))
+      .mockResolvedValueOnce(Response.json(output("ok")));
+    expect(
+      await generateStudioJson(
+        { ...input, image: undefined, images },
+        options(fetcher),
+      ),
+    ).toBe("ok");
+    expect(fetcher.mock.calls[0][1]?.body).toBe(fetcher.mock.calls[1][1]?.body);
+    const parts = JSON.parse(String(fetcher.mock.calls[0][1]?.body)).contents[0]
+      .parts;
+    expect(parts).toHaveLength(11);
+    images.forEach((image, i) => {
+      expect(parts[1 + i * 2].text).toContain(`图${i + 1}`);
+      expect(parts[2 + i * 2].inlineData).toEqual({
+        data: image.data,
+        mimeType: image.mimeType,
+      });
+    });
+    expect(String(fetcher.mock.calls[0][0])).not.toContain(
+      "synthetic-test-value",
+    );
+  });
   it.each([404, 405, 501])(
     "retries missing streaming route %s once, retaining input and shared deadline",
     async (status) => {
@@ -93,13 +124,11 @@ describe("fixed LK888 team transport", () => {
     const bytes = new TextEncoder().encode(
       `data: ${JSON.stringify(output("partial"))}\n\ndata: {"error":{"code":404}}\n\n`,
     );
-    const fetcher = vi
-      .fn<typeof fetch>()
-      .mockResolvedValue(
-        new Response(bytes, {
-          headers: { "content-type": "text/event-stream" },
-        }),
-      );
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(bytes, {
+        headers: { "content-type": "text/event-stream" },
+      }),
+    );
     await expect(
       generateStudioJson(input, options(fetcher)),
     ).rejects.toMatchObject({ code: "MODEL_RESPONSE_ERROR" });

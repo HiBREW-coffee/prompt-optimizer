@@ -6,6 +6,12 @@ const sources = {
   composition: "image-prompt-composition/composition.ts",
   migration: "image-prompt-migration/migration.ts",
   text: "user-optimize/user-prompt-basic.ts",
+  ecommerce: "image-optimize/text2image/ecommerce-product-photography.ts",
+  photography: "image-optimize/text2image/photography-optimize.ts",
+  identity: "image-optimize/image2image/product-identity-lock.ts",
+  multiimage: "image-optimize/multiimage/multiimage-optimize.ts",
+  lighting: "image-optimize/multiimage/reference-lighting-transfer.ts",
+  structured: "image-optimize/text2image/json-structured-optimize.ts",
 };
 const systems = {};
 for (const [key, path] of Object.entries(sources)) {

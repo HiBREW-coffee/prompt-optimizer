@@ -4,6 +4,7 @@ export interface GeminiInput {
   system: string;
   text: string;
   image?: { data: string; mimeType: string };
+  images?: Array<{ data: string; mimeType: string; index: number }>;
 }
 type Fetcher = typeof fetch;
 const LK888 = "https://api.lk888.ai";
@@ -22,14 +23,23 @@ export async function generateStudioJson(
     throw new StudioError("SERVER_CONFIGURATION", 503);
   const transport = options.fetcher ?? fetch;
   const parts: Record<string, unknown>[] = [{ text: input.text }];
-  if (input.image) parts.push({ inlineData: input.image });
+  if (input.images?.length) {
+    for (const image of input.images) {
+      parts.push({
+        text: `图${image.index} / Image ${image.index}（以下图片对应此编号）`,
+      });
+      parts.push({
+        inlineData: { data: image.data, mimeType: image.mimeType },
+      });
+    }
+  } else if (input.image) parts.push({ inlineData: input.image });
   const body = JSON.stringify({
     systemInstruction: { parts: [{ text: input.system }] },
     contents: [{ role: "user", parts }],
     generationConfig: {
       temperature: 0.2,
       responseMimeType: "application/json",
-      maxOutputTokens: 8192,
+      maxOutputTokens: 16384,
     },
   });
   const request = (stream: boolean) =>

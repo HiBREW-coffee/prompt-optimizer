@@ -4,6 +4,7 @@ import { beforeAll, afterAll, beforeEach, describe, it, expect } from "vitest";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 let db: PGlite;
+let legacyUpgrade: { workspace: any; library: any };
 const a = "11111111-1111-4111-8111-111111111111",
   b = "22222222-2222-4222-8222-222222222222",
   outsider = "33333333-3333-4333-8333-333333333333";
@@ -74,6 +75,26 @@ beforeAll(async () => {
     "utf8",
   );
   await db.exec(sql);
+  await db.exec(`insert into auth.users(id) values('${a}');
+    insert into public.ps_members(user_id,email) values('${a}','legacy@example.com');
+    insert into public.ps_workspaces(id,owner_id,title,mode,source_text,reference_path) values('${w}','${a}','Legacy reference','reference','original brief','${a}/abc.png');
+    insert into public.ps_library(owner_id,title,mode,bundle,context,reference_path) values('${a}','Legacy shared reference','reference','${bundle}','{}','${a}/abc.png');`);
+  await db.exec(
+    await readFile(
+      fileURLToPath(
+        new URL(
+          "../../../../supabase/migrations/202610230002_dongwu_studio.sql",
+          import.meta.url,
+        ),
+      ),
+      "utf8",
+    ),
+  );
+  legacyUpgrade = {
+    workspace: (await db.query("select * from ps_workspaces where id=$1", [w]))
+      .rows[0],
+    library: (await db.query("select * from ps_library")).rows[0],
+  };
 }, 30_000);
 afterAll(async () => {
   await db?.close();
@@ -89,6 +110,134 @@ beforeEach(async () => {
  `);
 });
 describe("real PostgreSQL migration and policies", () => {
+  it("upgrades existing single-image records without changing their original brief or path", () => {
+    const expected = [{ path: `${a}/abc.png`, role: "auto", note: "" }];
+    expect(legacyUpgrade.workspace.reference_images).toEqual(expected);
+    expect(legacyUpgrade.workspace.source_text).toBe("original brief");
+    expect(legacyUpgrade.workspace.reference_path).toBe(`${a}/abc.png`);
+    expect(legacyUpgrade.workspace.intent).toBe("replicate");
+    expect(legacyUpgrade.library.reference_images).toEqual(expected);
+    expect(legacyUpgrade.library.bundle).toEqual(JSON.parse(bundle));
+  });
+  it("validates five owned references, rejecting duplicates, foreign paths and six images", async () => {
+    const refs = Array.from({ length: 5 }, (_, i) => ({
+      path: `${a}/${i + 1}.png`,
+      role: "auto",
+      note: "",
+    }));
+    await db.query("update ps_workspaces set reference_images=$1 where id=$2", [
+      JSON.stringify(refs),
+      w,
+    ]);
+    expect(
+      (
+        await db.query<{ reference_images: any[] }>(
+          "select reference_images from ps_workspaces where id=$1",
+          [w],
+        )
+      ).rows[0].reference_images,
+    ).toHaveLength(5);
+    for (const invalid of [
+      [...refs, { path: `${a}/six.png`, role: "auto", note: "" }],
+      [refs[0], refs[0]],
+      [{ ...refs[0], path: `${b}/1.png` }],
+      [{ ...refs[0], note: 1 }],
+    ]) {
+      await expect(
+        db.query("update ps_workspaces set reference_images=$1 where id=$2", [
+          JSON.stringify(invalid),
+          w,
+        ]),
+      ).rejects.toThrow(/ps_workspace_references_valid/);
+    }
+  });
+  it("stores input analysis transactionally and isolates it from other members and direct client writes", async () => {
+    await begin();
+    const result = await db.query<{ result: any }>(
+      "select ps_complete_inspection($1,$2,$3,$4,$5) result",
+      [
+        a,
+        w,
+        JSON.stringify({
+          score: 71,
+          structure: [{ title: "主体", content: "产品" }],
+          suggestions: [],
+        }),
+        JSON.stringify({
+          source: "图1产品",
+          reference_images: [
+            { path: `${a}/abc.png`, role: "product", note: "" },
+          ],
+        }),
+        r,
+      ],
+    );
+    expect(result.rows[0].result.inspection.workspace_id).toBe(w);
+    expect(
+      (
+        await db.query<{ status: string }>(
+          "select status from ps_requests where id=$1",
+          [r],
+        )
+      ).rows[0].status,
+    ).toBe("succeeded");
+    await asUser(b);
+    expect((await db.query("select * from ps_inspections")).rows).toHaveLength(
+      0,
+    );
+    await expect(db.exec("delete from ps_inspections")).rejects.toThrow(
+      /permission denied/,
+    );
+    await asUser(a);
+    expect((await db.query("select * from ps_inspections")).rows).toHaveLength(
+      1,
+    );
+  });
+  it("does not complete another workspace's input analysis with a valid but unrelated request", async () => {
+    await begin();
+    await expect(
+      db.query("select ps_complete_inspection($1,$2,$3,$4,$5)", [
+        b,
+        wb,
+        "{}",
+        "{}",
+        r,
+      ]),
+    ).rejects.toThrow(/REQUEST_INTERRUPTED/);
+    expect((await db.query("select * from ps_inspections")).rows).toHaveLength(
+      0,
+    );
+  });
+  it("only explicitly shared references are visible, including later images in a five-image library item", async () => {
+    const refs = [
+      { path: `${a}/abc.png`, role: "product", note: "" },
+      { path: `${a}/abc2.png`, role: "scene", note: "" },
+    ];
+    await db.exec(
+      `insert into storage.objects(bucket_id,name) values('prompt-studio-references','${a}/abc2.png')`,
+    );
+    await db.query(
+      "insert into ps_library(owner_id,title,mode,bundle,context,reference_images) values($1,'shared','reference',$2,'{}',$3)",
+      [a, bundle, JSON.stringify(refs)],
+    );
+    await asUser(b);
+    expect(
+      (
+        await db.query("select name from storage.objects where name=$1", [
+          `${a}/abc2.png`,
+        ])
+      ).rows,
+    ).toHaveLength(1);
+    await db.exec("reset role;delete from ps_library;");
+    await asUser(b);
+    expect(
+      (
+        await db.query("select name from storage.objects where name=$1", [
+          `${a}/abc2.png`,
+        ])
+      ).rows,
+    ).toHaveLength(0);
+  });
   it("only allows owner workspace/history reads and refuses client writes", async () => {
     await append();
     await asUser(b);
