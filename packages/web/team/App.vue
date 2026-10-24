@@ -5,6 +5,7 @@ import ProfessionalReportView from "./ProfessionalReport.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
 import StudioIcon from "./StudioIcon.vue";
 import Wordmark from "./Wordmark.vue";
+import PicwishLauncher from "./PicwishLauncher.vue";
 import { useRunFeedback } from "./useRunFeedback";
 import MemoryPanel from "./MemoryPanel.vue";
 import { applicableMemory } from "../../../supabase/functions/_shared/studio-memory";
@@ -36,6 +37,7 @@ import {
   message,
   needsPassword,
   SOURCE_URL,
+  originalReferenceFile,
 } from "./api";
 import type {
   StudioMode,
@@ -48,6 +50,20 @@ import type {
 } from "./api";
 import { normalizeBundle } from "../../../supabase/functions/_shared/studio-contract";
 const AVATAR_URL = "/dongwu-avatar.png";
+const originalFiles = new Map<string, File>();
+async function resolvePicwishFiles(references: ReferenceImage[]) {
+  const owner=user.value?.id;
+  if(!owner||!member.value?.active)throw new Error("请先登录工作室。");
+  const files:File[]=[];
+  for(const [index,image]of references.entries()){
+    const original=originalFiles.get(image.path);
+    if(original)files.push(original);
+    else if(image.temporary)throw new Error(`图${index+1}原文件未在本页，请先补传原文件再发送到佐糖。`);
+    else files.push(await originalReferenceFile(image.path,owner,index+1));
+  }
+  if(user.value?.id!==owner)throw new Error("登录状态已变化，请重新操作。");
+  return files;
+}
 const memoryOpen = ref(false);
 const memoryState = ref<StudioMemory>({ enabled: false, rules: [] });
 const feedback = useRunFeedback();
@@ -369,6 +385,7 @@ function newWork() {
   notice.value = "已新建，之前保存的作品可在历史记录中查看。";
 }
 function releasePreviews() {
+  originalFiles.clear();
   for (const image of images.value)
     if (image.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
 }
@@ -385,6 +402,7 @@ async function loadReferences(w: StudioWorkspace) {
 function removeImage(index: number) {
   if (busy.value) return;
   const [image] = images.value.splice(index, 1);
+  if(image)originalFiles.delete(image.path);
   if (image?.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
   notice.value = "已从本次参考中删除图片，图号已更新，请核对提示词中的图号。旧成果仍可查看。";
 }
@@ -425,6 +443,7 @@ async function chooseImage(event: Event) {
         throw new Error("IMAGES_TOO_LARGE");
       }
       images.value.push({ ...result, role: "auto", note: "" });
+      originalFiles.set(result.path,file);
     }
     notice.value = "参考图仅供本次页面使用，不存入工作室云端；刷新后需重新选择原图。图号按当前顺序对应。";
   });
@@ -443,6 +462,7 @@ async function restoreImage(index: number, event: Event) {
     }
     images.value[index] = { ...image, data: prepared.data, mimeType: prepared.mimeType,
       digest: prepared.digest, preview: prepared.preview };
+    originalFiles.set(image.path,file);
     notice.value = "原图已重新载入本次页面，不会长期保存。";
   });
   input.value = "";
@@ -1906,6 +1926,7 @@ onBeforeUnmount(() => {
         <a :href="SOURCE_URL" target="_blank" rel="noopener">查看源码</a>
       </footer>
     </main>
+    <PicwishLauncher v-if="isEditor" :busy="busy" :result-prompt="selected ? draftZh : ''" :source-prompt="source" :keep-text="keep" :images="images" :resolve-files="resolvePicwishFiles"/>
     <div
       v-if="inspirationOpen"
       class="modal-backdrop"

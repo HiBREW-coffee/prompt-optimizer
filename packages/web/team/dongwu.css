@@ -2001,5 +2001,20 @@ button.run-pending::after { content: ""; display: inline-block; vertical-align: 
 .reference-delete { color: #a74d3f; }
 .upload-full { opacity: .5; cursor: default; }
 @keyframes dongwu-spin { to { transform: rotate(360deg); } }
+.picwish-launcher{position:fixed;right:18px;top:45%;z-index:65;font-size:13px}
+.picwish-fab{display:flex;align-items:center;gap:8px;border:0!important;border-radius:18px!important;padding:13px 15px!important;background:#282a22!important;color:#fff!important;box-shadow:0 8px 28px #24251d24;font-size:12px!important;writing-mode:vertical-rl;letter-spacing:2px}
+.picwish-fab .studio-icon{width:19px;height:19px;color:#ff9b72}
+.picwish-panel{position:absolute;right:66px;top:-170px;width:min(370px,calc(100vw - 100px));max-height:calc(100dvh - 80px);overflow:auto;background:#fff;border:1px solid #e7e7e0;border-radius:24px;padding:23px;box-shadow:0 18px 80px #25262025}
+.picwish-panel-head{display:flex;justify-content:space-between;align-items:start;gap:12px}
+.picwish-panel-head small{font-size:9px;letter-spacing:2px;color:#96988a}.picwish-panel-head h2{font-size:21px;line-height:1.4;margin:8px 0 0;letter-spacing:-.8px}.picwish-panel-head button{border:0;background:#f4f4f0;border-radius:50%;width:28px;height:28px;padding:0;font-size:20px}
+.picwish-connection{display:flex;align-items:center;gap:7px;font-size:11px;color:#97998e;margin:17px 0}.picwish-connection i{width:6px;height:6px;background:#aaa;border-radius:50%}.picwish-connection.connected i{background:#74916b}
+.picwish-panel p{line-height:1.7}.picwish-panel label{display:grid;gap:7px;margin:12px 0}.picwish-panel select{font-size:12px;padding:10px;border-radius:11px;width:100%}
+.picwish-prompt-preview{white-space:pre-wrap;max-height:160px;overflow:auto;padding:13px;border-radius:13px;background:#f7f7f4;color:#56594c;font-size:12px;line-height:1.7}
+.picwish-file-count{display:flex;align-items:center;gap:7px;font-size:12px}.picwish-file-count .studio-icon{width:16px;height:16px}
+.picwish-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:16px 0}.picwish-actions button{font-size:12px;padding:10px 12px;border-radius:99px}.picwish-actions .primary{display:flex;align-items:center;gap:7px;background:#f27a47;border-color:#f27a47;color:#fff}.picwish-actions a{font-size:12px;color:#777b6b}.picwish-actions .studio-icon{width:14px;height:14px}
+.picwish-download{display:flex;align-items:center;justify-content:space-between;padding:14px 16px;margin:18px 0;background:#fff1e8;border:1px solid #f6d9c7;border-radius:14px;color:#a84d26;text-decoration:none;font-size:12px}.picwish-download .studio-icon{width:15px;height:15px}
+.picwish-install{padding-left:20px;color:#666b5c;font-size:12px;line-height:1.8}.picwish-install li{margin:7px 0}.picwish-install code{font-size:11px;overflow-wrap:anywhere}
+.picwish-error,.picwish-receipt{padding:11px 13px;border-radius:12px;font-size:12px}.picwish-error{background:#fff2ed;color:#ac4934}.picwish-receipt{background:#f0f5eb;color:#5d7550}
+@media(max-width:640px){.picwish-launcher{top:auto;bottom:22px;right:14px}.picwish-fab{writing-mode:horizontal-tb;letter-spacing:0;border-radius:99px!important;padding:12px 16px!important}.picwish-panel{right:0;top:auto;bottom:58px;width:min(370px,calc(100vw - 28px));max-height:calc(100dvh - 140px);padding:20px}}
 @media (prefers-reduced-motion: reduce) { button.run-pending::after, .progress-orbit { animation: none; } }
 @media (max-width: 640px) { .dongwu-wordmark { width: 138px; height: 23px; } .intent-controls { gap: 5px; } }

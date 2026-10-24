@@ -197,6 +197,13 @@ export async function uploadImage(
   return { path, preview: URL.createObjectURL(image), temporary: true as const,
     digest, sourceDigest, data: btoa(binary), mimeType: file.type };
 }
+export async function originalReferenceFile(path:string,owner:string,index:number):Promise<File> {
+  if(!db||!path.startsWith(owner+"/")||!/^[-a-f0-9]+\.(png|jpe?g)$/.test(path.slice(owner.length+1)))throw new Error("参考图访问无效。");
+  const {data,error}=await db.storage.from(BUCKET).download(path);
+  if(error||!data||!data.size||data.size>10*1024*1024)throw new Error("无法读取历史参考图，请补选原文件。");
+  const type=/\.png$/i.test(path)?"image/png":"image/jpeg";
+  return new File([data],`图${index}-历史保存版本.${type==='image/png'?'png':'jpg'}`,{type});
+}
 export function download(
   name: string,
   value: string,
@@ -262,4 +269,3 @@ export async function exportPrivateData() {
     ),
   );
 }
-

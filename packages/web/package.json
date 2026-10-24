@@ -13,7 +13,7 @@
     "test:coverage": "vitest run --coverage",
     "test:unit": "vitest run tests/unit",
     "dev:team": "vite --config vite.team.config.ts",
-    "build:team": "vite build --config vite.team.config.ts",
+    "build:team": "node ../../scripts/build-picwish-extension.mjs && vite build --config vite.team.config.ts",
     "typecheck:team": "vue-tsc --noEmit -p tsconfig.team.json",
     "test:team": "vitest run tests/team"
   },
