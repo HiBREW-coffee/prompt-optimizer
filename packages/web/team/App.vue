@@ -1342,7 +1342,13 @@ onBeforeUnmount(() => {
               </section>
               <p class="intent-description">
                 {{
-                  intent === "style"
+                  mode === "text"
+                    ? intent === "style"
+                      ? "保留任务目标与硬约束，只学习你指定的表达风格和组织方式。"
+                      : intent === "inspiration"
+                        ? "围绕你的目标补充可选方向，由你判断哪些创意值得保留。"
+                        : "保留原意与硬约束，理清目标、执行要求和输出格式。"
+                    : intent === "style"
                     ? "保留你的主体，只学习指定参考图的风格、构图、色彩和光影。"
                     : intent === "inspiration"
                       ? "以你的意图为中心拓展方案，明确区分图中事实和新增创意。"
@@ -1355,7 +1361,7 @@ onBeforeUnmount(() => {
                   rows="2"
                   maxlength="8000"
                   :disabled="busy"
-                  placeholder="例如：相同机位、主体比例、侧面柔光"
+                  :placeholder="mode === 'reference' ? '例如：相同机位、主体比例、侧面柔光' : '例如：原有变量、产品名称、任务边界、指定语气或格式'"
                 ></textarea>
               </label>
               <label
@@ -1427,9 +1433,9 @@ onBeforeUnmount(() => {
               </div>
               <div v-if="!selected" class="empty-result">
                 <span class="empty-symbol">⌘</span>
-                <h3>好的提示词，从看清细节开始</h3>
+                <h3>{{ mode === 'reference' ? '好的提示词，从看清细节开始' : '把想法打磨成可用的提示词' }}</h3>
                 <p>
-                  先分析原文与参考图，再生成完整专业报告。<br />包含中英提示词、图间映射、固定要素、结构、负向约束与参数建议。
+                  {{ mode === 'reference' ? '先分析原文与参考图，再生成完整专业报告。' : '先分析原文，再逐步完善目标、限制与输出。' }}<br />{{ mode === 'reference' ? '包含中英提示词、图间映射、固定要素、结构、负向约束与参数建议。' : '保留中英提示词、结构化 JSON、质量评估与修改建议。' }}
                 </p>
               </div>
               <template v-else

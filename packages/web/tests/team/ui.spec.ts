@@ -185,6 +185,17 @@ async function extract(wrapper: ReturnType<typeof mount>) {
   await flushPromises();
 }
 describe("real team Vue workflow", () => {
+  it("uses task-appropriate copy in the text workspace",async()=>{
+    const wrapper=await ready();
+    await button(wrapper,"文字提示词").trigger("click");await flushPromises();
+    expect(wrapper.get("h1").text()).toBe("把一句想法，写成清晰的创作指令");
+    expect(wrapper.text()).toContain("先润色表达，再打磨结构。");
+    expect(wrapper.text()).toContain("先分析原文，再逐步完善目标、限制与输出。");
+    expect(wrapper.text()).not.toContain("图间映射");
+    expect(wrapper.get('textarea[placeholder^="例如：原有变量"]').exists()).toBe(true);
+    expect(button(wrapper,"AI 润色").exists()).toBe(true);
+    wrapper.unmount();
+  });
   it("lets an existing work add and delete references while retaining its previous versions",async()=>{
     const wrapper=await ready();await extract(wrapper);
     expect(f.data.versions).toHaveLength(1);
