@@ -152,8 +152,18 @@ import { imagePromptCompositionTemplateEn } from './image-prompt-composition';
 import { imagePromptMigrationTemplate } from './image-prompt-migration';
 import { imagePromptMigrationTemplateEn } from './image-prompt-migration';
 
+import { template as ps_product_identity_lock } from './image-optimize/image2image/product-identity-lock';
+import { template as ps_reference_lighting_transfer } from './image-optimize/multiimage/reference-lighting-transfer';
+import { template as ps_ecommerce_product_photography } from './image-optimize/text2image/ecommerce-product-photography';
+import { template as ps_ecommerce_copy_plain_language } from './user-optimize/ecommerce-copy-plain-language';
+
 // 简单的模板集合 - 模板自身已包含完整信息（id、name、language、type等）
 export const ALL_TEMPLATES = {
+  // HiBREW Prompt Studio domain presets
+  ps_product_identity_lock,
+  ps_reference_lighting_transfer,
+  ps_ecommerce_product_photography,
+  ps_ecommerce_copy_plain_language,
   general_optimize,
   general_optimize_en,
   output_format_optimize,

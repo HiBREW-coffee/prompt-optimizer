@@ -31,6 +31,8 @@ const messages = {
     "imageModels": "Image Models",
     "functionModels": "Function Models",
     "modelList": "Model List",
+    "lk888BridgeHint": "LK888 Gemini-compatible API: use the same-origin development proxy to avoid browser CORS restrictions. Your API key stays unchanged.",
+    "lk888BridgeAction": "Use LK888 bridge",
     "testConnection": "Test Connection",
     "editModel": "Edit",
     "deleteModel": "Delete",

@@ -31,6 +31,8 @@ const messages = {
     "imageModels": "图像模型",
     "functionModels": "功能模型",
     "modelList": "模型列表",
+    "lk888BridgeHint": "LK888 Gemini 兼容服务：开发环境可使用同源代理，绕开浏览器跨域限制。API Key 保持不变。",
+    "lk888BridgeAction": "使用 LK888 兼容代理",
     "testConnection": "测试连接",
     "editModel": "编辑",
     "deleteModel": "删除",

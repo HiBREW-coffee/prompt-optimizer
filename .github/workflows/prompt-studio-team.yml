@@ -1,0 +1,45 @@
+name: Prompt Studio Team
+on:
+  pull_request:
+    branches: [develop, main, master]
+  push:
+    branches: [feature/prompt-studio-design-templates-v1, develop, main, master]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: prompt-studio-team-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: node scripts/sync-team-templates.mjs --check
+      - run: pnpm typecheck:team
+      - run: pnpm test:team
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno check --config supabase/functions/prompt-studio-api/deno.json supabase/functions/prompt-studio-api/index.ts
+      - run: pnpm build:team
+        env:
+          VITE_TEAM_SUPABASE_URL: ${{ vars.VITE_TEAM_SUPABASE_URL }}
+          VITE_TEAM_SUPABASE_ANON_KEY: ${{ vars.VITE_TEAM_SUPABASE_ANON_KEY }}
+      - run: node scripts/check-team-dist.mjs
+      - run: node scripts/build-team-edge.mjs
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prompt-studio-team
+          include-hidden-files: true
+          path: |
+            packages/web/dist-team
+            supabase/.temp/prompt-studio-api.ts
+            supabase/migrations/202610230001_prompt_studio.sql
+          retention-days: 14

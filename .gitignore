@@ -202,3 +202,12 @@ AGENTS.md
 .codex-run/
 .codex-tmp/
 .trellis/
+
+# Team deployment artifacts and local platform sessions
+supabase/.temp/
+supabase/functions/prompt-studio-api/deno.lock
+packages/web/team/public/downloads/*.zip
+acceptance-picwish-*.js
+acceptance-file.*.js
+acceptance-useImageUpload.*.js
+acceptance-productImageFormat.*.js
