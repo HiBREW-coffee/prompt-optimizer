@@ -185,6 +185,78 @@ async function extract(wrapper: ReturnType<typeof mount>) {
   await flushPromises();
 }
 describe("real team Vue workflow", () => {
+  it("lets an existing work add and delete references while retaining its previous versions",async()=>{
+    const wrapper=await ready();await extract(wrapper);
+    expect(f.data.versions).toHaveLength(1);
+    f.upload.mockResolvedValueOnce({path:uid+"/def.png",preview:"blob:second"});
+    const input=wrapper.get('input[type="file"]');
+    Object.defineProperty(input.element,"files",{value:[new File(["new"],"scene.png",{type:"image/png"})],configurable:true});
+    await input.trigger("change");await flushPromises();
+    expect(wrapper.findAll(".reference-card")).toHaveLength(2);
+    await wrapper.get('[aria-label="删除图1"]').trigger("click");
+    expect(wrapper.findAll(".reference-card")).toHaveLength(1);
+    await button(wrapper,"按要求生成新版本").trigger("click");await flushPromises();
+    expect(f.data.versions).toHaveLength(2);
+    expect(f.data.workspaces[0].reference_images[0].path).toBe(uid+"/def.png");
+    expect(wrapper.find(".sidebar-bottom a").exists()).toBe(false);
+    wrapper.unmount();
+  });
+  it("previews editable AI polishing without replacing source until explicit adoption",async()=>{
+    const original=f.call.getMockImplementation()!;
+    let resolvePolish!: (value:any)=>void;
+    f.call.mockImplementation((action:string,body:any)=>action==="prompt.polish"?new Promise(resolve=>{resolvePolish=resolve;}):original(action,body));
+    const wrapper=await ready();
+    await wrapper.get("#studio-prompt").setValue("把产品放进自然的场景");
+    const polish=button(wrapper,"AI 润色");
+    await polish.trigger("click");await flushPromises();
+    expect(polish.attributes("aria-busy")).toBe("true");
+    expect(polish.classes()).toContain("run-pending");
+    expect(polish.text()).toBe("AI 润色");
+    expect(wrapper.find(".generation-progress").exists()).toBe(false);
+    expect(wrapper.find(".banner.pending").exists()).toBe(false);
+    resolvePolish({originalPrompt:"把产品放进自然的场景",polishedPrompt:"保留产品结构，匹配自然场景的透视、光影和接触关系。"});
+    await flushPromises();
+    expect(polish.classes()).not.toContain("run-pending");
+    expect(wrapper.get("#studio-prompt").element.value).toBe("把产品放进自然的场景");
+    await wrapper.get('textarea[aria-label="润色后的提示词"]').setValue("保留产品结构，加入木桌场景并匹配自然侧光。");
+    await button(wrapper,"采用润色").trigger("click");
+    expect(wrapper.get("#studio-prompt").element.value).toContain("木桌场景");
+    expect(f.data.versions).toHaveLength(0);
+    wrapper.unmount();
+  });
+  it("clears the running animation after a failed polish without replacing text or retrying",async()=>{
+    const original=f.call.getMockImplementation()!;
+    f.call.mockImplementation((action:string,body:any)=>action==="prompt.polish"?Promise.reject(new Error("MODEL_HTTP_502")):original(action,body));
+    const wrapper=await ready();
+    await wrapper.get("#studio-prompt").setValue("简单想法");
+    const polish=button(wrapper,"AI 润色");
+    await polish.trigger("click");await flushPromises();
+    expect(polish.classes()).not.toContain("run-pending");
+    expect(polish.attributes("aria-busy")).toBeUndefined();
+    expect(wrapper.get("#studio-prompt").element.value).toBe("简单想法");
+    expect(wrapper.find(".polish-preview").exists()).toBe(false);
+    expect(f.call.mock.calls.filter(([action])=>action==="prompt.polish")).toHaveLength(1);
+    wrapper.unmount();
+  });
+  it("shows actual elapsed time only for full generation and always clears its running animation",async()=>{
+    vi.useFakeTimers({toFake:["Date","setInterval","clearInterval"]});
+    try {
+      const original=f.call.getMockImplementation()!;
+      let finish!:()=>void;
+      f.call.mockImplementation((action:string,body:any)=>action==="reference.extract"
+        ?new Promise(resolve=>{finish=()=>resolve(original(action,body));}):original(action,body));
+      const wrapper=await ready();await extract(wrapper);
+      const generate=button(wrapper,"提炼参考图提示词");
+      expect(generate.classes()).toContain("run-pending");
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(wrapper.get(".generation-progress").text()).toContain("00:05");
+      expect(wrapper.get(".generation-progress").text()).not.toContain("%");
+      finish();await flushPromises();
+      expect(wrapper.find(".generation-progress").exists()).toBe(false);
+      expect(generate.classes()).not.toContain("run-pending");
+      wrapper.unmount();
+    } finally { vi.useRealTimers(); }
+  });
   it("saves only temporary image metadata and requires the original file after reopening", async () => {
     const prepared = {path:uid+"/abc.png",preview:"blob:temporary",temporary:true,
       digest:"a".repeat(64),sourceDigest:"b".repeat(64),data:"aGVsbG8=",mimeType:"image/png"};
@@ -267,7 +339,7 @@ describe("real team Vue workflow", () => {
   });
   it("defaults to reference extraction and exposes no image generation or model settings", async () => {
     const wrapper = await ready();
-    expect(wrapper.text()).toContain("把参考图，提炼成创作语言");
+    expect(wrapper.text()).toContain("让想法，精准落在画面里");
     expect(wrapper.text()).not.toMatch(/文生图|图生图|模型管理|API Key/);
     expect(wrapper.find('a[href*="/image/"]').exists()).toBe(false);
     expect(wrapper.find("input[type=file]").attributes("multiple")).toBe("");
@@ -521,7 +593,7 @@ describe("real team Vue workflow", () => {
     });
     await input.trigger("change");
     await flushPromises();
-    await wrapper.get('[aria-label="移除图2"]').trigger("click");
+    await wrapper.get('[aria-label="删除图2"]').trigger("click");
     await wrapper.get('[aria-label="上移图2"]').trigger("click");
     await button(wrapper, "分析原文与参考图").trigger("click");
     await flushPromises();
@@ -589,4 +661,3 @@ describe("real team Vue workflow", () => {
     wrapper.unmount();
   });
 });
-

@@ -4,7 +4,6 @@ import StudioIcon from "./StudioIcon.vue";
 defineProps<{
   images: Array<ReferenceImage & { preview: string; data?: string }>;
   busy: boolean;
-  locked: boolean;
 }>();
 const emit = defineEmits<{
   change: [event: Event];
@@ -31,14 +30,7 @@ const emit = defineEmits<{
           <img v-if="image.preview" :src="image.preview" :alt="`图${index + 1}参考图`" />
           <span v-else class="reference-missing">原图未长期保存</span><b
             >图{{ index + 1 }}</b
-          ><button
-            v-if="!locked"
-            :disabled="busy"
-            :aria-label="`移除图${index + 1}`"
-            @click="emit('remove', index)"
           >
-            ×
-          </button>
         </div>
         <label v-if="image.temporary && !image.preview" class="restore-reference">
           重新选择图{{ index + 1 }}原文件
@@ -81,7 +73,7 @@ const emit = defineEmits<{
             )
           "
         />
-        <div class="reference-order" v-if="!locked">
+        <div class="reference-order">
           <button
             :disabled="busy || index === 0"
             :aria-label="`上移图${index + 1}`"
@@ -95,33 +87,29 @@ const emit = defineEmits<{
           >
             后移 →
           </button>
+          <button class="reference-delete" :disabled="busy" :aria-label="`删除图${index+1}`" @click="emit('remove',index)">删除</button>
         </div>
       </article>
     </div>
     <label
-      v-if="!locked && images.length < 5"
       class="upload-control"
-      :class="{ compact: images.length }"
+      :class="{ compact: images.length, 'upload-full': images.length >= 5 }"
     >
       <StudioIcon :name="images.length ? 'plus' : 'image'" /><strong>{{
-        images.length ? "添加参考图" : "上传参考图，让想法有据可循"
+        images.length ? "添加图片" : "上传参考图，让想法有据可循"
       }}</strong
       ><small>最多5张 · 单张 PNG / JPEG ≤ 10MB</small>
       <input
         type="file"
         multiple
         accept="image/png,image/jpeg"
-        :disabled="busy"
+        :disabled="busy || images.length >= 5"
         @change="emit('change', $event)"
       />
     </label>
-    <p class="hint" v-if="locked">
-      {{ images.some(image => image.temporary) ? '图号、用途和文字成果已保存；原图仅供本次使用，刷新后需重新选择原文件。' : '旧参考图仍随历史版本保存；添加或调整图片顺序请新建作品。用途说明仍可调整。' }}
-    </p>
-    <p class="reference-help" v-else>
-      例如：图1提供产品，图2提供桌面与背景，图3提供人物。拖选或逐次添加后，请在提示词里说明怎样组合。
-      新图仅供本次使用，不长期保存到工作室云端。
+    <p class="reference-help">
+      可直接添加、删除或调整顺序，最多5张。图号变化后，请核对提示词；旧成果保留。
+      新图仅供本次使用，刷新后可按图号补传原文件。
     </p>
   </div>
 </template>
-

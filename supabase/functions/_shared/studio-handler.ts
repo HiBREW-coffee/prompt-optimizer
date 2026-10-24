@@ -42,6 +42,7 @@ export interface StudioStore {
     request?: { status: string; result?: unknown; error_code?: string };
   }>;
   image(path: string): Promise<Uint8Array>;
+  polish(user: string, workspace: string, request: string, prompt: string, original: string): Promise<unknown>;
   memory?(user: string, workspace: StudioWorkspace): Promise<MemoryRule[]>;
   suggestion(
     user: string,
@@ -164,7 +165,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
         throw new StudioError("INVALID_ACTION");
       if (action.startsWith("reference.") && workspace.mode !== "reference")
         throw new StudioError("INVALID_ACTION");
-      if (workspace.mode === "text" && !workspace.source_text.trim())
+      if ((workspace.mode === "text" || action === "prompt.polish") && !workspace.source_text.trim())
         throw new StudioError("PROMPT_REQUIRED");
       if (["reference.rewrite", "prompt.evaluate"].includes(action) && !version)
         throw new StudioError("VERSION_REQUIRED");
@@ -175,9 +176,9 @@ export function createStudioHandler(deps: HandlerDependencies) {
         user.id,
       );
       const temporaryImages = await inlineReferences(body.referenceData, references);
-      if (workspace.mode === "reference" && references.length === 0)
+      if (workspace.mode === "reference" && references.length === 0 && action !== "prompt.polish")
         throw new StudioError("IMAGE_REQUIRED");
-      if (workspace.mode === "reference")
+      if (workspace.mode === "reference" && action !== "prompt.polish")
         validateReferenceMentions(
           [
             workspace.source_text,
@@ -256,7 +257,8 @@ export function createStudioHandler(deps: HandlerDependencies) {
         workspace,
         version,
         suggestion,
-        Boolean(body.inspectionId),
+        Boolean(body.inspectionId) || Boolean(version && Array.isArray(version.context.reference_images) &&
+          stableJson(version.context.reference_images) !== stableJson(references)),
         memory,
       );
       if (workspace.mode === "reference") {
@@ -290,6 +292,11 @@ export function createStudioHandler(deps: HandlerDependencies) {
       if (controller.signal.aborted)
         throw new StudioError("REQUEST_TIMEOUT", 504);
       const parsed = parseObject(raw);
+      if (action === "prompt.polish") {
+        if (typeof parsed.prompt !== "string" || !parsed.prompt.trim() || parsed.prompt.length > 32000)
+          throw new StudioError("INVALID_MODEL_OUTPUT", 502);
+        return new Response(JSON.stringify(await store.polish(user.id, workspace.id, id, parsed.prompt.trim(), workspace.source_text)), { headers });
+      }
       const isAnalysis =
         action === "prompt.evaluate" || action === "prompt.inspect";
       const bundle = isAnalysis ? null : normalizeBundle(parsed);
@@ -322,6 +329,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
         bundle &&
         version &&
         !body.inspectionId &&
+        !(Array.isArray(version.context.reference_images) && stableJson(version.context.reference_images) !== stableJson(references)) &&
         (action === "reference.rewrite" || suggestion)
       ) {
         if (
@@ -395,4 +403,3 @@ async function readBody(request: Request, max: number): Promise<string> {
     await reader.cancel().catch(() => {});
   }
 }
-

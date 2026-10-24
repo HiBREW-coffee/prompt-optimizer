@@ -66,6 +66,7 @@ function harness(overrides: Partial<StudioStore> = {}) {
       .mockResolvedValue(
         new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0]),
       ),
+    polish: vi.fn().mockImplementation(async (_u,_w,_r,prompt,original) => ({ polishedPrompt: prompt, originalPrompt: original })),
     suggestion: vi.fn().mockResolvedValue("具体修改"),
     save: vi.fn().mockImplementation(async (_u, _w, _p, b) => ({
       version: { ...version, bundle: b },
@@ -129,6 +130,37 @@ function harness(overrides: Partial<StudioStore> = {}) {
   return { store, fetcher, generate, handler, request };
 }
 describe("authenticated team AI chain", () => {
+  it("polishes a short reference brief before images exist without saving a generated version", async () => {
+    const h=harness({workspace:vi.fn().mockResolvedValue({...workspace,reference_path:null,source_text:"把图1产品放进图2场景"})});
+    h.fetcher.mockReset().mockResolvedValueOnce(new Response("",{status:404})).mockResolvedValueOnce(Response.json({
+      candidates:[{content:{parts:[{text:JSON.stringify({prompt:"依据图1保留产品几何，待图2提供场景后匹配透视、尺度和接触阴影。"})}]},finishReason:"STOP"}],
+    }));
+    const response=await h.request({action:"prompt.polish",workspaceId:wid,requestId:rid});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({polishedPrompt:expect.stringContaining("接触阴影"),originalPrompt:"把图1产品放进图2场景"});
+    expect(h.fetcher).toHaveBeenCalledTimes(2);
+    expect(h.store.polish).toHaveBeenCalledOnce();
+    expect(h.store.save).not.toHaveBeenCalled();
+    expect(h.store.image).not.toHaveBeenCalled();
+  });
+  it("rejects empty polishing output and does not retry or overwrite the original",async()=>{
+    const h=harness();h.generate.mockResolvedValue(JSON.stringify({prompt:"  "}));
+    const response=await h.request({action:"prompt.polish",workspaceId:wid,requestId:rid});
+    expect(response.status).toBe(502);expect(h.generate).toHaveBeenCalledTimes(1);
+    expect(h.store.polish).not.toHaveBeenCalled();expect(h.store.save).not.toHaveBeenCalled();
+  });
+  it("rebuilds after reference changes instead of inheriting the removed picture's old details",async()=>{
+    const references=[{path:uid+"/def.png",role:"scene",note:"新的场景"}];
+    const h=harness({
+      workspace:vi.fn().mockResolvedValue({...workspace,reference_path:references[0].path,reference_images:references}),
+      version:vi.fn().mockResolvedValue({...version,context:{reference_images:[{path:workspace.reference_path,role:"product",note:"旧产品"}]},
+        bundle:{...bundle,structured:{obsolete:"仅旧图中的细节"}}}),
+    });
+    const response=await h.request({action:"reference.rewrite",workspaceId:wid,versionId:vid,requestId:rid});
+    expect(response.status).toBe(200);
+    expect(JSON.parse(h.generate.mock.calls[0][0].text).current).toBeNull();
+    expect(h.store.save).toHaveBeenCalledWith(uid,expect.any(Object),vid,expect.any(Object),"reference.rewrite",rid);
+  });
   it("sends five temporary references through the LK888 fallback without storing or downloading images", async () => {
     const images = await Promise.all(Array.from({length:5},async(_,index)=>{
       const bytes = new Uint8Array([137,80,78,71,13,10,26,10,0,0,0,index]);
@@ -833,4 +865,3 @@ describe("authenticated team AI chain", () => {
     ).toBe(413);
   });
 });
-

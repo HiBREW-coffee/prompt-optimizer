@@ -1,6 +1,7 @@
 /** Portable contract shared by the team UI, Edge Function and transport tests. */
 export type StudioMode = "text" | "reference";
 export type AiAction =
+  | "prompt.polish"
   | "prompt.inspect"
   | "text.optimize"
   | "reference.extract"
@@ -109,6 +110,7 @@ export class StudioError extends Error {
   }
 }
 export const AI_ACTIONS: AiAction[] = [
+  "prompt.polish",
   "prompt.inspect",
   "text.optimize",
   "reference.extract",
@@ -440,4 +442,3 @@ export function stableJson(value: unknown): string {
       .join(",")}}`;
   return JSON.stringify(value) ?? "null";
 }
-

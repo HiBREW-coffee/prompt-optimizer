@@ -156,6 +156,17 @@ export class SupabaseStudioStore implements StudioStore {
     check(error);
     return data;
   }
+  async polish(user: string, workspace: string, request: string, prompt: string, original: string) {
+    const result = { polishedPrompt: prompt, originalPrompt: original };
+    const { data, error } = await this.db.from("ps_requests")
+      .update({ status: "succeeded", finished_at: new Date().toISOString(), result })
+      .eq("id", request).eq("owner_id", user).eq("workspace_id", workspace)
+      .eq("status", "running").gt("expires_at", new Date().toISOString())
+      .select("id").maybeSingle();
+    check(error);
+    if (!data) throw new StudioError("REQUEST_INTERRUPTED", 409);
+    return result;
+  }
   async analyze(
     user: string,
     versionId: string,
@@ -289,13 +300,7 @@ export class SupabaseStudioStore implements StudioStore {
       };
       if (body.workspaceId) {
         const w = await this.workspace(user, requireId(body.workspaceId));
-        if (
-          w.mode !== mode ||
-          (w.current_version_id && workspaceReferences(w).length > 0 &&
-            stableJson(workspaceReferences(w).map((image) => [image.path, image.sourceDigest ?? ""])) !==
-              stableJson(references.map((image) => [image.path, image.sourceDigest ?? ""])))
-        )
-          throw new StudioError("REFERENCE_LOCKED", 409);
+        if (w.mode !== mode) throw new StudioError("INVALID_ACTION", 409);
         const { data, error } = await this.db
           .from("ps_workspaces")
           .update(changes)
@@ -601,4 +606,3 @@ function memberPassword(value: unknown): string {
     throw new StudioError("INVALID_PASSWORD");
   return value;
 }
-

@@ -4,6 +4,8 @@ import ReferenceBoard from "./ReferenceBoard.vue";
 import ProfessionalReportView from "./ProfessionalReport.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
 import StudioIcon from "./StudioIcon.vue";
+import Wordmark from "./Wordmark.vue";
+import { useRunFeedback } from "./useRunFeedback";
 import MemoryPanel from "./MemoryPanel.vue";
 import { applicableMemory } from "../../../supabase/functions/_shared/studio-memory";
 import type { StudioMemory } from "../../../supabase/functions/_shared/studio-memory";
@@ -48,6 +50,14 @@ import { normalizeBundle } from "../../../supabase/functions/_shared/studio-cont
 const AVATAR_URL = "/dongwu-avatar.png";
 const memoryOpen = ref(false);
 const memoryState = ref<StudioMemory>({ enabled: false, rules: [] });
+const feedback = useRunFeedback();
+const runningAction = ref("");
+const polishPreview = ref<{ originalPrompt: string; polishedPrompt: string } | null>(null);
+const generationRunning = computed(() => busy.value && ["text.optimize","reference.extract","reference.rewrite"].includes(runningAction.value));
+const elapsedLabel = computed(() => {
+  const seconds = feedback.elapsed.value;
+  return String(Math.floor(seconds/60)).padStart(2,"0") + ":" + String(seconds%60).padStart(2,"0");
+});
 
 type Page =
   | "reference"
@@ -83,7 +93,6 @@ const title = ref(""),
   inspirationOpen = ref(false),
   inspection = ref<InspectionRow | null>(null);
 const imagePath = computed(() => images.value[0]?.path ?? null);
-const referencesLocked = computed(() => !!selected.value && !!workspace.value && workspaceReferences(workspace.value).length > 0);
 const workspace = ref<StudioWorkspace | null>(null),
   versions = ref<StudioVersion[]>([]),
   selected = ref<StudioVersion | null>(null);
@@ -191,9 +200,11 @@ let authSubscription: { unsubscribe(): void } | undefined;
 const explain = (e: unknown) => {
   error.value = message(e);
 };
-async function attempt(fn: () => Promise<void>) {
+async function attempt(fn: () => Promise<void>, action = "") {
   if (busy.value) return;
   busy.value = true;
+  runningAction.value = action;
+  feedback.begin();
   error.value = "";
   notice.value = "";
   try {
@@ -201,6 +212,8 @@ async function attempt(fn: () => Promise<void>) {
   } catch (e) {
     explain(e);
   } finally {
+    feedback.end();
+    runningAction.value = "";
     busy.value = false;
   }
 }
@@ -249,6 +262,7 @@ async function recoverPassword() {
 }
 async function logout() {
   if (busy.value || !mayLeaveEditor()) return;
+  await attempt(async () => {
   await db!.auth.signOut();
   member.value = null;
   memoryState.value = { enabled: false, rules: [] };
@@ -260,6 +274,7 @@ async function logout() {
   members.value = [];
   inviteUrl.value = "";
   pendingId.value = "";
+  });
 }
 async function loadMember() {
   if (!user.value || !db) return;
@@ -312,6 +327,7 @@ async function loadLists() {
     );
 }
 function resetEditor() {
+  polishPreview.value = null;
   workspace.value = null;
   versions.value = [];
   selected.value = null;
@@ -367,12 +383,13 @@ async function loadReferences(w: StudioWorkspace) {
   if (user.value?.id === owner) images.value = result;
 }
 function removeImage(index: number) {
-  if (busy.value || referencesLocked.value) return;
+  if (busy.value) return;
   const [image] = images.value.splice(index, 1);
   if (image?.preview.startsWith("blob:")) URL.revokeObjectURL(image.preview);
+  notice.value = "已从本次参考中删除图片，图号已更新，请核对提示词中的图号。旧成果仍可查看。";
 }
 function moveImage(index: number, direction: number) {
-  if (busy.value || referencesLocked.value) return;
+  if (busy.value) return;
   const next = index + direction;
   if (next < 0 || next >= images.value.length) return;
   const [image] = images.value.splice(index, 1);
@@ -390,7 +407,6 @@ async function chooseImage(event: Event) {
   const files = Array.from(input.files ?? []);
   await attempt(async () => {
     if (!files.length) return;
-    if (referencesLocked.value) throw new Error("REFERENCE_LOCKED");
     if (images.value.length + files.length > 5)
       throw new Error("INVALID_REFERENCE_IMAGES");
     if (
@@ -598,7 +614,7 @@ async function acceptVersion(data: {
 async function run(action: AiAction, suggestionId?: string, fromInput = false) {
   await attempt(async () => {
     const owner = user.value?.id;
-    if (mode.value === "reference" && !imagePath.value) {
+    if (mode.value === "reference" && !imagePath.value && action !== "prompt.polish") {
       error.value = "请先上传参考图。";
       return;
     }
@@ -606,7 +622,7 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
       error.value = "本次参考图未长期保存，请重新选择对应原图后再看图分析或继续优化。";
       return;
     }
-    if (mode.value === "text" && !source.value.trim()) {
+    if ((mode.value === "text" || action === "prompt.polish") && !source.value.trim()) {
       error.value = "请先输入需要优化的文字。";
       return;
     }
@@ -629,9 +645,11 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
         analysis?: AnalysisRow;
         inspection?: InspectionRow;
         pending?: boolean;
+        polishedPrompt?: string;
+        originalPrompt?: string;
       }>(action, {
         workspaceId: workspace.value!.id,
-        versionId: action === "prompt.inspect" ? undefined : selected.value?.id,
+        versionId: ["prompt.inspect","prompt.polish"].includes(action) ? undefined : selected.value?.id,
         requestId: id,
         ...(mode.value === "reference" && images.value.some(image => image.temporary)
           ? { referenceData: images.value.filter(image => image.temporary).map(({path,data,mimeType}) => ({path,data,mimeType})) }
@@ -655,6 +673,8 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
         });
       if (result.analysis) analysis.value = result.analysis;
       if (result.inspection) inspection.value = result.inspection;
+      if (typeof result.polishedPrompt === "string")
+        polishPreview.value = { originalPrompt: result.originalPrompt ?? source.value, polishedPrompt: result.polishedPrompt };
       pendingId.value = "";
       localStorage.removeItem(`ps-pending-${user.value!.id}`);
       await refreshUsage();
@@ -680,7 +700,12 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
       await refreshUsage();
       throw e;
     }
-  });
+  }, action);
+}
+function applyPolish() {
+  if (!polishPreview.value || source.value !== polishPreview.value.originalPrompt) return;
+  source.value = polishPreview.value.polishedPrompt;
+  polishPreview.value = null;
 }
 async function checkPending() {
   await attempt(async () => {
@@ -691,6 +716,8 @@ async function checkPending() {
         became_current?: boolean;
         analysis?: AnalysisRow;
         inspection?: InspectionRow;
+        polishedPrompt?: string;
+        originalPrompt?: string;
       };
       error_code: string;
       workspace_id: string;
@@ -731,6 +758,8 @@ async function checkPending() {
         if (request.result.analysis) analysis.value = request.result.analysis;
         if (request.result.inspection)
           inspection.value = request.result.inspection;
+        if (request.result.polishedPrompt)
+          polishPreview.value = { originalPrompt: request.result.originalPrompt ?? source.value, polishedPrompt: request.result.polishedPrompt };
       }
       notice.value = "上次结果已恢复。";
     } else {
@@ -1002,7 +1031,7 @@ onBeforeUnmount(() => {
       >
     </div>
   </div>
-  <div v-else-if="!user" class="gate">
+  <div v-else-if="!user" class="gate" @click.capture="feedback.capture" @submit.capture="feedback.capture">
     <form class="gate-card" @submit.prevent="login">
       <span class="eyebrow">@DONGWU / CREATIVE STUDIO</span>
       <h1>让好的画面，<br />成为可复用的提示词。</h1>
@@ -1022,7 +1051,7 @@ onBeforeUnmount(() => {
       /></label>
       <p v-if="error" role="alert" class="error">{{ error }}</p>
       <button class="primary" :disabled="busy">
-        {{ busy ? "正在登录…" : "登录工作室" }}</button
+        登录工作室</button
       ><button
         type="button"
         class="quiet"
@@ -1038,19 +1067,19 @@ onBeforeUnmount(() => {
   <div v-else-if="loading" class="gate" role="status">
     正在打开你的私人工作空间…
   </div>
-  <div v-else-if="!member?.active" class="gate">
+  <div v-else-if="!member?.active" class="gate" @click.capture="feedback.capture">
     <div class="gate-card">
       <h1>等待团队邀请</h1>
       <p>{{ error || "此账号尚未加入工作室，请联系管理员邀请。" }}</p>
-      <button @click="loadMember">重新检查</button
+      <button @click="attempt(loadMember)">重新检查</button
       ><button @click="logout">退出登录</button>
     </div>
   </div>
-  <div v-else class="studio">
+  <div v-else class="studio" @click.capture="feedback.capture" @submit.capture="feedback.capture">
     <aside class="sidebar">
       <a class="brand" href="#" @click.prevent="navigate('reference')"
         ><img :src="AVATAR_URL" alt="@DONGWU头像" /><span
-          >@DONGWU<small>创作工作室</small></span
+          ><Wordmark /><small>创作工作室</small></span
         ></a
       >
       <span class="nav-label">创作空间</span>
@@ -1097,14 +1126,11 @@ onBeforeUnmount(() => {
           <small>今日请求 {{ used }} 次{{ dailyLimit > 0 ? ` / ${dailyLimit}` : ' · 每日不限' }}</small>
           <progress v-if="dailyLimit > 0" :value="used" :max="dailyLimit"></progress>
         </template>
-        <a :href="SOURCE_URL" target="_blank" rel="noopener"
-          >开源代码 · AGPL-3.0</a
-        >
       </div>
     </aside>
     <main>
       <header class="topbar">
-        <span class="workspace-wordmark">@DONGWU</span>
+        <span class="workspace-wordmark"><Wordmark /></span>
         <nav class="topnav" aria-label="顶部导航">
           <button
             :class="{ active: page === 'reference' }"
@@ -1157,7 +1183,7 @@ onBeforeUnmount(() => {
           {{ error }}<button class="quiet" @click="error = ''">关闭</button>
         </div>
         <div v-if="notice" class="banner" role="status">{{ notice }}</div>
-        <div v-if="pendingId" class="banner pending">
+        <div v-if="pendingId && !busy" class="banner pending">
           有一次请求可以查询，查询不会再次调用模型。<button
             :disabled="busy"
             @click="checkPending"
@@ -1173,21 +1199,21 @@ onBeforeUnmount(() => {
             <div>
               <span class="eyebrow">{{
                 mode === "reference"
-                  ? "FROM REFERENCE TO PROMPT"
-                  : "MAKE YOUR INTENT CLEAR"
+                  ? "SHAPE YOUR CREATIVE DIRECTION"
+                  : "FROM AN IDEA TO A CLEAR BRIEF"
               }}</span>
               <h1>
                 {{
                   mode === "reference"
-                    ? "把参考图，提炼成创作语言"
-                    : "把想法，打磨成清晰的提示词"
+                    ? "让想法，精准落在画面里"
+                    : "把一句想法，写成清晰的创作指令"
                 }}
               </h1>
               <p>
                 {{
                   mode === "reference"
-                    ? "先忠实还原，再按你的要求调整。构图、光线与细节，都有据可循。"
-                    : "保留你的本意，补足结构与约束，让每次表达更准确。"
+                    ? "从参考图出发，梳理画面关系，让每个细节都有明确的创作依据。"
+                    : "说出想做什么，让表达更有条理；再由你审定每一个细节。"
                 }}
               </p>
             </div>
@@ -1203,13 +1229,13 @@ onBeforeUnmount(() => {
                 ><strong>{{
                   mode === "reference"
                     ? "让每张参考图，各司其职。"
-                    : "从模糊想法，到清晰表达。"
+                    : "先润色表达，再打磨结构。"
                 }}</strong>
                 <p>
                   {{
                     mode === "reference"
                       ? "最多 5 张图片，明确主体、场景与风格的借用边界。"
-                      : "分析结构，补足约束，保留你的创作本意。"
+                      : "从原始大意到可执行的提示词，逐步完善目标、限制与输出。"
                   }}
                 </p>
               </div>
@@ -1252,7 +1278,6 @@ onBeforeUnmount(() => {
                 v-if="mode === 'reference'"
                 :images="images"
                 :busy="busy"
-                :locked="referencesLocked"
                 @change="chooseImage"
                 @remove="removeImage"
                 @move="moveImage"
@@ -1262,6 +1287,9 @@ onBeforeUnmount(() => {
               <div class="prompt-heading">
                 <span>提示词</span>
                 <div class="intent-controls">
+                  <button class="polish-button" :disabled="busy || !configured || !source.trim()" @click="run('prompt.polish')">
+                    <StudioIcon name="spark" />AI 润色
+                  </button>
                   <button
                     :class="{ active: intent === 'inspiration' }"
                     :aria-pressed="intent === 'inspiration'"
@@ -1302,6 +1330,16 @@ onBeforeUnmount(() => {
                     : '写下原始提示词、任务目标、补充说明与需要修改的内容…'
                 "
               ></textarea>
+              <section v-if="polishPreview" class="polish-preview" aria-label="AI 润色建议">
+                <div class="panel-head"><strong>润色建议</strong><span class="tag">待你审定</span></div>
+                <textarea v-model="polishPreview.polishedPrompt" aria-label="润色后的提示词" rows="5" maxlength="32000" :disabled="busy"></textarea>
+                <details><summary>查看润色前文本</summary><p>{{ polishPreview.originalPrompt }}</p></details>
+                <p v-if="source !== polishPreview.originalPrompt" class="hint">原文已调整，可先核对并手动复制需要的内容。</p>
+                <div class="actions">
+                  <button class="primary" :disabled="busy || !polishPreview.polishedPrompt.trim() || source !== polishPreview.originalPrompt" @click="applyPolish">采用润色</button>
+                  <button :disabled="busy" @click="polishPreview = null">暂不采用</button>
+                </div>
+              </section>
               <p class="intent-description">
                 {{
                   intent === "style"
@@ -1364,9 +1402,7 @@ onBeforeUnmount(() => {
                   "
                 >
                   {{
-                    busy
-                      ? "正在处理并保存…"
-                      : mode === "text"
+                    mode === "text"
                         ? "优化并提炼"
                         : selected
                           ? "按要求生成新版本"
@@ -1375,8 +1411,12 @@ onBeforeUnmount(() => {
                 </button>
               </div>
               <small class="hint"
-                >结果自动保存 · 分析与优化分别计次 · 单次最长约 2 分钟</small
+                >结果自动保存 · 可先润色，再分析与生成</small
               >
+              <div v-if="generationRunning" class="generation-progress" role="status">
+                <span class="progress-orbit" aria-hidden="true"></span>
+                <span>生成中 · 已用 {{ elapsedLabel }}</span><small>单次最长约2分钟</small>
+              </div>
             </section>
             <section class="panel result-panel">
               <div class="panel-head">
@@ -1996,4 +2036,3 @@ onBeforeUnmount(() => {
     </div>
   </div>
 </template>
-
