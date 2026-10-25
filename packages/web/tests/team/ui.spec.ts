@@ -7,6 +7,7 @@ const f = vi.hoisted(() => ({
   logout: vi.fn(),
   getSession: vi.fn(),
   recovery: vi.fn(),
+  signIn: vi.fn(),
   data: {
     workspaces: [] as any[],
     versions: [] as any[],
@@ -22,7 +23,7 @@ vi.mock("../../team/api", () => ({
         data: { subscription: { unsubscribe: vi.fn() } },
       }),
       signOut: f.logout,
-      signInWithPassword: vi.fn(),
+      signInWithPassword: f.signIn,
       resetPasswordForEmail: f.recovery,
     },
   },
@@ -59,6 +60,7 @@ beforeEach(() => {
   f.data = { workspaces: [], versions: [], analyses: [], library: [] };
   f.getSession.mockResolvedValue({ data: { session: { user: { id: uid } } } });
   f.recovery.mockResolvedValue({ error: null });
+  f.signIn.mockResolvedValue({ error: null });
   f.upload.mockResolvedValue({
     path: `${uid}/abc.png`,
     preview: "blob:preview",
@@ -513,7 +515,7 @@ describe("real team Vue workflow", () => {
   it("shows invite-only login without registration", async () => {
     f.getSession.mockResolvedValue({ data: { session: null } });
     const wrapper = await ready();
-    expect(wrapper.text()).toContain("仅限受邀成员");
+    expect(wrapper.text()).toContain("仅限管理员添加的成员");
     expect(wrapper.text()).not.toContain("注册账号");
     wrapper.unmount();
   });
@@ -664,13 +666,13 @@ describe("real team Vue workflow", () => {
     const wrapper = await ready();
     await button(wrapper, "团队管理").trigger("click");
     await flushPromises();
-    await wrapper.get('input[autocomplete="off"]').setValue("new@example.com");
+    await wrapper.get('input[autocomplete="off"]').setValue("NewMember01");
     const field = wrapper.get('input[autocomplete="new-password"]');
     await field.setValue("Synthetic-initial-password");
     await button(wrapper, "创建成员").trigger("submit");
     await flushPromises();
     expect(f.call).toHaveBeenCalledWith("member.create", {
-      email: "new@example.com",
+      username: "newmember01",
       password: "Synthetic-initial-password",
     });
     expect((field.element as HTMLInputElement).value).toBe("");
@@ -693,13 +695,46 @@ describe("real team Vue workflow", () => {
   it("sends a user-requested password reset back to this site without changing project defaults", async () => {
     f.getSession.mockResolvedValue({ data: { session: null } });
     const wrapper = await ready();
-    await wrapper.get('input[type="email"]').setValue("admin@example.com");
-    await button(wrapper, "忘记密码 / 首次设置密码").trigger("click");
+    await wrapper.get('input[autocomplete="username"]').setValue("admin@example.com");
+    await button(wrapper, "忘记密码").trigger("click");
     await flushPromises();
     expect(f.recovery).toHaveBeenCalledWith("admin@example.com", {
       redirectTo: location.origin,
     });
     expect(wrapper.text()).toContain("你会收到密码重设链接");
     wrapper.unmount();
+  });
+  it.each([[" Design01 ","design01@accounts.dongwu.invalid"],["Owner@Example.com","owner@example.com"]])("logs in with %s while keeping passwords out of persistent application data",async(identifier,authEmail)=>{
+    f.getSession.mockResolvedValue({data:{session:null}});
+    const wrapper=await ready();
+    expect(wrapper.get('input[autocomplete="username"]').attributes('type')).toBe('text');
+    expect(wrapper.text()).toContain('账号');
+    await wrapper.get('input[autocomplete="username"]').setValue(identifier);
+    await wrapper.get('input[type="password"]').setValue('Synthetic-login-password-123');
+    await wrapper.get('form').trigger('submit');await flushPromises();
+    expect(f.signIn).toHaveBeenCalledWith({email:authEmail,password:'Synthetic-login-password-123'});
+    expect(wrapper.get('input[type="password"]').element.value).toBe('');
+    expect(localStorage.length).toBe(0);wrapper.unmount();
+  });
+  it("routes account password recovery to the administrator without sending an email or revealing whether the account exists",async()=>{
+    f.getSession.mockResolvedValue({data:{session:null}});
+    const wrapper=await ready();
+    await wrapper.get('input[autocomplete="username"]').setValue('design01');
+    await button(wrapper,'忘记密码').trigger('click');await flushPromises();
+    expect(f.recovery).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain('请联系管理员');
+    expect(f.call).not.toHaveBeenCalledWith('member.password',expect.anything());wrapper.unmount();
+  });
+  it("shows account names in the profile, member list and password dialog rather than internal Auth addresses",async()=>{
+    const previousRows=f.rows.getMockImplementation()!;
+    f.rows.mockImplementation(async(table,configure)=>table==='ps_members'
+      ?[{user_id:uid,email:'owner@example.com',role:'admin',active:true},{user_id:'other',email:'design01@accounts.dongwu.invalid',role:'member',active:true}]
+      :previousRows(table,configure));
+    const wrapper=await ready();await button(wrapper,'团队管理').trigger('click');await flushPromises();
+    expect(wrapper.text()).toContain('design01');
+    expect(wrapper.text()).not.toContain('accounts.dongwu.invalid');
+    const reset=wrapper.findAll('button').find(b=>b.text()==='重设密码');
+    expect(reset).toBeDefined();await reset!.trigger('click');await flushPromises();
+    expect(wrapper.text()).not.toContain('accounts.dongwu.invalid');wrapper.unmount();
   });
 });

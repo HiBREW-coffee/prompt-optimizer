@@ -92,6 +92,9 @@ const errors: Record<string, string> = {
   ORIGIN_DENIED: "当前网站地址尚未加入后台允许列表，请管理员检查部署配置。",
   INVITE_FAILED: "邀请未生成，请检查账号状态或稍后重试。",
   INVALID_EMAIL: "请填写有效的成员邮箱。",
+  INVALID_USERNAME: "账号需为3–32位字母、数字、下划线或短横线，并以字母或数字开头。",
+  INVALID_LOGIN_ID: "请输入管理员分配的账号，或继续使用原有邮箱账号。",
+  USERNAME_EXISTS: "这个账号已存在，请换一个账号名。已有成员的密码不会被修改。",
   INVALID_PASSWORD: "密码需要 12 至 128 位。",
   MEMBER_EXISTS:
     "这个邮箱已有账号。请通过下方邀请链接将其加入工作室，已有密码不会被修改。",

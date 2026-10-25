@@ -41,6 +41,28 @@ function harness() {
   };
 }
 describe("administrator-managed member passwords", () => {
+  it("creates a normalized account with the same identity used for password login, without email delivery",async()=>{
+    const h=harness();
+    expect(await h.command("member.create",{username:" Design_01 ",password,role:"admin"})).toEqual({ok:true,username:"design_01"});
+    expect(h.auth.createUser).toHaveBeenCalledWith({email:"design_01@accounts.dongwu.invalid",password,email_confirm:true,
+      app_metadata:{prompt_studio_managed:true,prompt_studio_username:"design_01"}});
+    expect(h.query.insert).toHaveBeenCalledWith({user_id:target,email:"design_01@accounts.dongwu.invalid",role:"member",active:true});
+    expect(h.auth.generateLink).not.toHaveBeenCalled();
+  });
+  it.each(["ab","a".repeat(33),"name@example.com","-test","张三001","name space",null])("rejects invalid account %s before creating Auth identity",async(username)=>{
+    const h=harness();await expect(h.command("member.create",{username,password})).rejects.toThrow("INVALID_USERNAME");
+    expect(h.auth.createUser).not.toHaveBeenCalled();expect(h.query.insert).not.toHaveBeenCalled();
+  });
+  it("does not reuse, reset or invite an existing account when a username is taken",async()=>{
+    const h=harness();h.auth.createUser.mockResolvedValue({data:{},error:{code:"email_exists",message:password}});
+    await expect(h.command("member.create",{username:"design01",password})).rejects.toThrow(/^USERNAME_EXISTS$/);
+    expect(h.query.insert).not.toHaveBeenCalled();expect(h.auth.updateUserById).not.toHaveBeenCalled();expect(h.auth.generateLink).not.toHaveBeenCalled();
+  });
+  it("rejects mixed identifiers and the reserved account namespace through legacy creation/invitation",async()=>{
+    const h=harness();await expect(h.command("member.create",{username:"design01",email:"other@example.com",password})).rejects.toThrow("INVALID_REQUEST");
+    for(const action of ["member.create","member.invite"])await expect(h.command(action,{email:"design01@accounts.dongwu.invalid",password})).rejects.toThrow("INVALID_EMAIL");
+    expect(h.auth.createUser).not.toHaveBeenCalled();expect(h.auth.generateLink).not.toHaveBeenCalled();
+  });
   it.each(["member.create", "member.password"])(
     "rejects non-admin %s before touching Auth",
     async (action) => {

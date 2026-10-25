@@ -27,6 +27,7 @@ import type {
   AiAction,
 } from "../../../supabase/functions/_shared/studio-contract";
 import type { User } from "@supabase/supabase-js";
+import { accountLabel, accountLoginEmail, normalizeUsername, isAccountEmail, USERNAME_PATTERN } from "../../../supabase/functions/_shared/studio-account";
 import {
   db,
   call,
@@ -137,7 +138,7 @@ const search = ref(""),
   shareImage = ref(false),
   inviteEmail = ref(""),
   inviteUrl = ref(""),
-  newMemberEmail = ref(""),
+  newMemberAccount = ref(""),
   newMemberPassword = ref(""),
   passwordMember = ref<Member | null>(null),
   resetMemberPassword = ref(""),
@@ -239,7 +240,7 @@ async function attempt(fn: () => Promise<void>, action = "") {
 async function login() {
   await attempt(async () => {
     const { error: e } = await db!.auth.signInWithPassword({
-      email: email.value,
+      email: accountLoginEmail(email.value),
       password: password.value,
     });
     if (e) throw new Error("UNAUTHENTICATED");
@@ -263,12 +264,17 @@ async function savePassword() {
 }
 async function recoverPassword() {
   await attempt(async () => {
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.value.trim())) {
-      error.value = "请先填写账号邮箱。";
+    if (!email.value.trim()) {
+      error.value = "请先填写账号；原邮箱账号请填写完整邮箱。";
+      return;
+    }
+    const authEmail = accountLoginEmail(email.value);
+    if (isAccountEmail(authEmail)) {
+      notice.value = "账号登录无需验证邮件。忘记密码请联系管理员，在团队管理中重设密码。";
       return;
     }
     const { error: recoveryError } = await db!.auth.resetPasswordForEmail(
-      email.value.trim(),
+      authEmail,
       {
         redirectTo: location.origin,
       },
@@ -956,17 +962,19 @@ async function invite() {
   });
 }
 async function createMember() {
+  if (busy.value) return;
   const initialPassword = newMemberPassword.value;
   newMemberPassword.value = "";
   await attempt(async () => {
+    const username = normalizeUsername(newMemberAccount.value);
     await call("member.create", {
-      email: newMemberEmail.value,
+      username,
       password: initialPassword,
     });
-    newMemberEmail.value = "";
+    newMemberAccount.value = "";
     await loadLists();
     notice.value =
-      "成员已添加。请私下告知邮箱和初始密码，成员登录后可自行修改。";
+      `成员已添加，账号：${username}。请私下告知账号和初始密码，成员可直接登录并自行修改密码。`;
   });
 }
 async function changeMemberPassword() {
@@ -1009,7 +1017,7 @@ watch(
     library.value = [];
     members.value = [];
     inviteUrl.value = "";
-    newMemberEmail.value = "";
+    newMemberAccount.value = "";
     newMemberPassword.value = "";
     passwordMember.value = null;
     resetMemberPassword.value = "";
@@ -1068,10 +1076,12 @@ onBeforeUnmount(() => {
       <h1>让好的画面，<br />成为可复用的提示词。</h1>
       <p>登录团队工作室，提炼参考图，打磨每一次表达。</p>
       <label
-        >账号邮箱<input
+        >账号<input
           v-model="email"
-          type="email"
+          type="text"
           autocomplete="username"
+          maxlength="254"
+          placeholder="输入管理员分配的账号"
           required /></label
       ><label
         >密码<input
@@ -1089,10 +1099,10 @@ onBeforeUnmount(() => {
         :disabled="busy"
         @click="recoverPassword"
       >
-        忘记密码 / 首次设置密码
+        忘记密码
       </button>
       <p v-if="notice" role="status">{{ notice }}</p>
-      <small>仅限受邀成员。首次使用请联系管理员获取账号。</small>
+      <small>仅限管理员添加的成员，使用账号和初始密码直接登录。原有邮箱账号也可继续使用。</small>
     </form>
   </div>
   <div v-else-if="loading" class="gate" role="status">
@@ -1191,7 +1201,7 @@ onBeforeUnmount(() => {
             :src="AVATAR_URL"
             alt="@DONGWU头像"
           /><span class="account"
-            ><b>@DONGWU</b><small>{{ member.email }}</small></span
+            ><b>@DONGWU</b><small>{{ accountLabel(member.email) }}</small></span
           ><button class="quiet" :disabled="busy" @click="setPassword = true">
             修改密码</button
           ><button class="quiet" @click="logout">退出</button>
@@ -1201,7 +1211,7 @@ onBeforeUnmount(() => {
             <img :src="AVATAR_URL" alt="@DONGWU头像" />
           </summary>
           <section>
-            <strong>@DONGWU</strong><small>{{ member.email }}</small>
+            <strong>@DONGWU</strong><small>{{ accountLabel(member.email) }}</small>
             <button :disabled="busy" @click="setPassword = true">
               修改密码
             </button>
@@ -1816,10 +1826,14 @@ onBeforeUnmount(() => {
               <h2>添加成员</h2>
               <form @submit.prevent="createMember">
                 <label
-                  >成员邮箱<input
-                    v-model="newMemberEmail"
-                    type="email"
+                  >成员账号<input
+                    v-model="newMemberAccount"
+                    type="text"
                     autocomplete="off"
+                    minlength="3"
+                    maxlength="32"
+                    :pattern="USERNAME_PATTERN"
+                    placeholder="例如：design01"
                     required
                 /></label>
                 <label
@@ -1832,13 +1846,12 @@ onBeforeUnmount(() => {
                     required
                 /></label>
                 <p class="hint">
-                  至少 12
-                  位。创建后，成员可以直接使用邮箱和密码登录，并自行修改密码。
+                  账号为3–32位字母、数字、下划线或短横线，以字母或数字开头，大小写视为同一账号。密码至少12位。创建后即可把账号和初始密码私下交给成员，无需收邮件或验证码。
                 </p>
                 <button class="primary" :disabled="busy">创建成员</button>
               </form>
               <details>
-                <summary>已有账号？使用邀请链接加入</summary>
+                <summary>已有邮箱账号？使用邀请链接加入</summary>
                 <form @submit.prevent="invite">
                   <label
                     >成员邮箱<input
@@ -1909,7 +1922,7 @@ onBeforeUnmount(() => {
             <h2>团队成员</h2>
             <div v-for="m in members" :key="m.user_id" class="member-row">
               <span
-                >{{ m.email }}
+                >{{ accountLabel(m.email) }}
                 <small>{{
                   m.role === "admin" ? "管理员" : m.active ? "使用中" : "已停用"
                 }}</small></span
@@ -2047,7 +2060,7 @@ onBeforeUnmount(() => {
         @submit.prevent="changeMemberPassword"
       >
         <h2>重设成员密码</h2>
-        <p>{{ passwordMember.email }}</p>
+        <p>{{ accountLabel(passwordMember.email) }}</p>
         <label
           >新密码<input
             v-model="resetMemberPassword"

@@ -16,6 +16,7 @@ import type { StudioVersion, StudioWorkspace } from "./studio-contract.ts";
 import type { StudioStore } from "./studio-handler.ts";
 import { applicableMemory, normalizeMemory } from "./studio-memory.ts";
 import type { StudioMemory } from "./studio-memory.ts";
+import { normalizeUsername, usernameEmail, isAccountEmail } from "./studio-account.ts";
 
 const BUCKET = "prompt-studio-references";
 function check(error: { message?: string } | null): void {
@@ -462,8 +463,11 @@ export class SupabaseStudioStore implements StudioStore {
     }
     if (!admin) throw new StudioError("FORBIDDEN", 403);
     if (action === "member.create") {
-      const email = limitedText(body.email, 254).toLowerCase();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      if (body.username !== undefined && body.email !== undefined)
+        throw new StudioError("INVALID_REQUEST");
+      const username = body.username === undefined ? null : normalizeUsername(body.username);
+      const email = username ? usernameEmail(username) : limitedText(body.email, 254).toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || (!username && isAccountEmail(email)))
         throw new StudioError("INVALID_EMAIL");
       const password = memberPassword(body.password);
       // Never change an existing shared Auth account when adding a studio member.
@@ -471,14 +475,14 @@ export class SupabaseStudioStore implements StudioStore {
         email,
         password,
         email_confirm: true,
-        app_metadata: { prompt_studio_managed: true },
+        app_metadata: { prompt_studio_managed: true, ...(username ? {prompt_studio_username: username} : {}) },
       });
       if (created.error || !created.data.user)
         throw new StudioError(
           ["email_exists", "user_already_exists"].includes(
             created.error?.code ?? "",
           )
-            ? "MEMBER_EXISTS"
+            ? username ? "USERNAME_EXISTS" : "MEMBER_EXISTS"
             : "MEMBER_CREATE_FAILED",
           400,
         );
@@ -488,9 +492,9 @@ export class SupabaseStudioStore implements StudioStore {
         role: "member",
         active: true,
       });
-      // An interrupted provision can be completed through the existing invitation flow.
+      // Do not report a usable member until app membership is saved as well.
       check(error);
-      return { ok: true };
+      return { ok: true, ...(username ? {username} : {}) };
     }
     if (action === "member.password") {
       const target = requireId(body.userId);
@@ -518,7 +522,7 @@ export class SupabaseStudioStore implements StudioStore {
     }
     if (action === "member.invite") {
       const email = limitedText(body.email, 254).toLowerCase();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || isAccountEmail(email))
         throw new StudioError("INVALID_EMAIL");
       let invitation = await this.db.auth.admin.generateLink({
         type: "invite",
