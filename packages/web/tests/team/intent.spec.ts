@@ -18,6 +18,7 @@ describe("intent-aligned reference pipeline",()=>{
       expect(input.system).toContain("当前为风格学习，不默认复刻整张图");
       expect(input.system).toContain("不自动复制图内产品身份");
       expect(input.system).toContain("图片里可见不等于用户要求生成");
+      expect(input.system).toContain("不得根据默认模板新增用途、数量、主体类别或审美要求");
       expect(input.system).not.toContain("唯一目标：把这张参考图尽可能准确地翻译");
       expect(input.system).not.toContain("不要把这项任务理解成“抽取纯风格”");
       expect(input.system).not.toContain("白色竖条纹咖啡机");
