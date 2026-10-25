@@ -50,6 +50,25 @@ describe("intent-aligned reference pipeline",()=>{
       expect(input.system).toContain("明确指出冲突来源");
     }
   });
+  it("treats the user's confirmed open subject as intentional across polish, inspection and generation",()=>{
+    const note="只学习场景风格，主体和配件不锁定，也不要求全部删除";
+    const open={...workspace,reference_images:[{path:workspace.reference_path!,role:"scene" as const,note}]};
+    for(const action of ["prompt.polish","prompt.inspect","reference.extract","reference.rewrite","prompt.evaluate"] as const){
+      const input=buildStudioPrompt(action,open,action==="reference.extract"?null:version);
+      expect(JSON.parse(input.text)).toMatchObject({original:workspace.source_text,images:[expect.objectContaining({role:"scene",instruction:note})]});
+      expect(input.system).toContain("主体类别、品牌和具体陈设是开放项");
+      expect(input.system).toContain("不得仅因这些有意开放的选项扣分");
+      expect(input.system).toContain("不得强制空场景或删除全部物品");
+    }
+  });
+  it("does not force a subject identity through the output schema or analysis checklist",()=>{
+    const generation=buildStudioPrompt("reference.extract",workspace,null).system;
+    expect(generation).toContain('"开放项"');
+    expect(generation).not.toContain('"structured":{"主体":');
+    const inspection=buildStudioPrompt("prompt.inspect",workspace,null).system;
+    expect(inspection).toContain("不强制主体身份或人物关系模块");
+    expect(inspection).not.toContain("图像任务通常覆盖主体身份");
+  });
   it("keeps replication and inspiration distinct and does not turn a text style task into a photo task",()=>{
     expect(buildStudioPrompt("reference.extract",{...workspace,intent:"replicate"},null).system).toContain("当前为复刻与受控重构");
     expect(buildStudioPrompt("reference.extract",{...workspace,intent:"inspiration"},null).system).toContain("当前为灵感拓展");
