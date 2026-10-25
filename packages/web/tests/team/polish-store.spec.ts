@@ -11,6 +11,11 @@ function harness(data: unknown = {id: request}) {
   return {query, db, store: new SupabaseStudioStore(db as any, "https://studio.example", true)};
 }
 describe("recoverable polishing result", () => {
+  it("persists the full original task snapshot so recovery cannot apply a polish to another intent",async()=>{
+    const h=harness(),context={source:"场景风格",keep:"",intent:"style",reference_images:[]};
+    expect(await h.store.polish(user,workspace,request,"场景指令","场景风格",context)).toMatchObject({originalContext:context});
+    expect(h.query.update).toHaveBeenCalledWith(expect.objectContaining({result:expect.objectContaining({originalContext:context})}));
+  });
   it("completes only the owner's active unexpired request without storing a generated version", async () => {
     const h = harness();
     expect(await h.store.polish(user, workspace, request, "专业指令", "简单想法"))

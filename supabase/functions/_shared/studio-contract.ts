@@ -411,6 +411,16 @@ export function workspaceContext(workspace: StudioWorkspace) {
     template_id: workspace.template_id ?? "ecommerce",
   };
 }
+/** Compare task inputs, not version IDs/titles or unrelated persistence metadata. */
+export function samePromptInputs(previous: Record<string, unknown>, current: Record<string, unknown>) {
+  const keys = ["source", "keep", "change", "reference_path", "reference_images", "intent", "template_id", "confirmed_preferences"];
+  const value = (context: Record<string, unknown>, key: string) => {
+    const item = context[key];
+    if (key === "confirmed_preferences") return item ?? [];
+    return typeof item === "string" ? item.trim() : item;
+  };
+  return keys.every(key => stableJson(value(previous, key)) === stableJson(value(current, key)));
+}
 export function validateReferenceMentions(text: string, count: number) {
   for (const match of text.matchAll(/(?:图\s*|\bimage\s*)(\d+)/gi)) {
     const index = Number(match[1]);

@@ -19,6 +19,7 @@ import {
   workspaceContext,
   stableJson,
   normalizeReferences,
+  samePromptInputs,
 } from "../../../supabase/functions/_shared/studio-contract";
 import type {
   ReferenceImage,
@@ -68,7 +69,7 @@ const memoryOpen = ref(false);
 const memoryState = ref<StudioMemory>({ enabled: false, rules: [] });
 const feedback = useRunFeedback();
 const runningAction = ref("");
-const polishPreview = ref<{ originalPrompt: string; polishedPrompt: string } | null>(null);
+const polishPreview = ref<{ originalPrompt: string; polishedPrompt: string; context: Record<string, unknown> } | null>(null);
 const generationRunning = computed(() => busy.value && ["text.optimize","reference.extract","reference.rewrite"].includes(runningAction.value));
 const elapsedLabel = computed(() => {
   const seconds = feedback.elapsed.value;
@@ -183,6 +184,8 @@ function editorContext() {
 function referenceMetadata() {
   return normalizeReferences(images.value, user.value?.id ?? "");
 }
+const resultStale = computed(() => !!selected.value && !samePromptInputs(selected.value.context, editorContext()));
+const polishStale = computed(() => !!polishPreview.value && !samePromptInputs(polishPreview.value.context, editorContext()));
 const analysisStale = computed(
   () =>
     !analysis.value ||
@@ -655,6 +658,10 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
     }
     const analysisId = fromInput ? inspection.value?.id : analysis.value?.id;
     await saveDraft();
+    const requestContext = {
+      ...workspaceContext(workspace.value!),
+      ...(activeMemory.value.length ? {confirmed_preferences: activeMemory.value} : {}),
+    };
     const id = crypto.randomUUID();
     pendingId.value = id;
     localStorage.setItem(`ps-pending-${user.value!.id}`, id);
@@ -667,8 +674,10 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
         pending?: boolean;
         polishedPrompt?: string;
         originalPrompt?: string;
+        originalContext?: Record<string, unknown>;
       }>(action, {
         workspaceId: workspace.value!.id,
+        expectedContext: requestContext,
         versionId: ["prompt.inspect","prompt.polish"].includes(action) ? undefined : selected.value?.id,
         requestId: id,
         ...(mode.value === "reference" && images.value.some(image => image.temporary)
@@ -694,7 +703,7 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
       if (result.analysis) analysis.value = result.analysis;
       if (result.inspection) inspection.value = result.inspection;
       if (typeof result.polishedPrompt === "string")
-        polishPreview.value = { originalPrompt: result.originalPrompt ?? source.value, polishedPrompt: result.polishedPrompt };
+        polishPreview.value = { originalPrompt: result.originalPrompt ?? source.value, polishedPrompt: result.polishedPrompt, context: result.originalContext ?? requestContext };
       pendingId.value = "";
       localStorage.removeItem(`ps-pending-${user.value!.id}`);
       await refreshUsage();
@@ -711,6 +720,7 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
           "INCOMPLETE_PROFESSIONAL_REPORT",
           "INVALID_SCORE_SCALE",
           "REFERENCE_INDEX_MISSING",
+          "STALE_WORKSPACE",
         ].includes(e.message)
       ) {
         pendingId.value = "";
@@ -723,7 +733,7 @@ async function run(action: AiAction, suggestionId?: string, fromInput = false) {
   }, action);
 }
 function applyPolish() {
-  if (!polishPreview.value || source.value !== polishPreview.value.originalPrompt) return;
+  if (!polishPreview.value || polishStale.value) return;
   source.value = polishPreview.value.polishedPrompt;
   polishPreview.value = null;
 }
@@ -738,6 +748,7 @@ async function checkPending() {
         inspection?: InspectionRow;
         polishedPrompt?: string;
         originalPrompt?: string;
+        originalContext?: Record<string, unknown>;
       };
       error_code: string;
       workspace_id: string;
@@ -779,7 +790,7 @@ async function checkPending() {
         if (request.result.inspection)
           inspection.value = request.result.inspection;
         if (request.result.polishedPrompt)
-          polishPreview.value = { originalPrompt: request.result.originalPrompt ?? source.value, polishedPrompt: request.result.polishedPrompt };
+          polishPreview.value = { originalPrompt: request.result.originalPrompt ?? source.value, polishedPrompt: request.result.polishedPrompt, context: request.result.originalContext ?? {} };
       }
       notice.value = "上次结果已恢复。";
     } else {
@@ -1354,9 +1365,10 @@ onBeforeUnmount(() => {
                 <div class="panel-head"><strong>润色建议</strong><span class="tag">待你审定</span></div>
                 <textarea v-model="polishPreview.polishedPrompt" aria-label="润色后的提示词" rows="5" maxlength="32000" :disabled="busy"></textarea>
                 <details><summary>查看润色前文本</summary><p>{{ polishPreview.originalPrompt }}</p></details>
-                <p v-if="source !== polishPreview.originalPrompt" class="hint">原文已调整，可先核对并手动复制需要的内容。</p>
+                <p class="hint">这只是待审定的润色建议；采用后还需点击生成，才会更新右侧成果。</p>
+                <p v-if="polishStale" class="hint">提示词、保留项、模式或参考图已变化；请重新润色，或手动复制需要的内容。</p>
                 <div class="actions">
-                  <button class="primary" :disabled="busy || !polishPreview.polishedPrompt.trim() || source !== polishPreview.originalPrompt" @click="applyPolish">采用润色</button>
+                  <button class="primary" :disabled="busy || !polishPreview.polishedPrompt.trim() || polishStale" @click="applyPolish">采用润色</button>
                   <button :disabled="busy" @click="polishPreview = null">暂不采用</button>
                 </div>
               </section>
@@ -1369,21 +1381,21 @@ onBeforeUnmount(() => {
                         ? "围绕你的目标补充可选方向，由你判断哪些创意值得保留。"
                         : "保留原意与硬约束，理清目标、执行要求和输出格式。"
                     : intent === "style"
-                    ? "保留你的主体，只学习指定参考图的风格、构图、色彩和光影。"
+                    ? "只借用你指定的风格、构图、色彩和光影；未指定主体时，不自动复刻图内产品。"
                     : intent === "inspiration"
                       ? "以你的意图为中心拓展方案，明确区分图中事实和新增创意。"
                       : "忠实复现；如需多图重构，请明确每张图要借用的内容。"
                 }}
               </p>
-              <label
-                >需要保留<textarea
+              <div class="keep-heading"><label for="studio-keep">需要保留</label><button v-if="keep.trim()" type="button" :disabled="busy" @click="keep = ''">清除保留要求</button></div>
+              <textarea id="studio-keep"
                   v-model="keep"
                   rows="2"
                   maxlength="8000"
                   :disabled="busy"
                   :placeholder="mode === 'reference' ? '例如：相同机位、主体比例、侧面柔光' : '例如：原有变量、产品名称、任务边界、指定语气或格式'"
                 ></textarea>
-              </label>
+              <p v-if="keep.trim()" class="keep-notice">这些保留要求会与上方提示词一起发送。{{ intent === 'style' ? '只学场景风格时，请核对是否仍需锁定旧产品、机位和配件。' : '更换创作方向时，请同时核对这里的内容。' }}</p>
               <label
                 >优化模板<select v-model="templateId" :disabled="busy">
                   <option
@@ -1458,8 +1470,9 @@ onBeforeUnmount(() => {
                   {{ mode === 'reference' ? '先分析原文与参考图，再生成完整专业报告。' : '先分析原文，再逐步完善目标、限制与输出。' }}<br />{{ mode === 'reference' ? '包含中英提示词、图间映射、固定要素、结构、负向约束与参数建议。' : '保留中英提示词、结构化 JSON、质量评估与修改建议。' }}
                 </p>
               </div>
-              <template v-else
-                ><div class="result-toolbar">
+              <template v-else>
+                <div v-if="resultStale" class="result-stale" role="status">当前显示 V{{ selected.sequence }} 的历史成果，尚未按新要求生成。提示词、保留项、模式或参考图已变化；再次生成将按当前输入重新理解。</div>
+                <div class="result-toolbar">
                   <div class="tabs" role="tablist" aria-label="结果格式">
                     <button
                       v-for="tab in ['report', 'zh', 'en', 'json'] as const"
@@ -1926,7 +1939,7 @@ onBeforeUnmount(() => {
         <a :href="SOURCE_URL" target="_blank" rel="noopener">查看源码</a>
       </footer>
     </main>
-    <PicwishLauncher v-if="isEditor" :busy="busy" :result-prompt="selected ? draftZh : ''" :source-prompt="source" :keep-text="keep" :images="images" :resolve-files="resolvePicwishFiles"/>
+    <PicwishLauncher v-if="isEditor" :busy="busy" :result-prompt="selected && !resultStale ? draftZh : ''" :source-prompt="source" :keep-text="keep" :images="images" :resolve-files="resolvePicwishFiles"/>
     <div
       v-if="inspirationOpen"
       class="modal-backdrop"

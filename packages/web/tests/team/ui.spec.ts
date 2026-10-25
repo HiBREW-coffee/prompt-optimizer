@@ -130,7 +130,7 @@ beforeEach(() => {
         sequence: f.data.versions.length + 1,
         parent_id: body.versionId || null,
         bundle: body.bundle || bundle,
-        context: {},
+        context: workspaceContext(f.data.workspaces[0]),
         kind: action,
         created_at: new Date().toISOString(),
       };
@@ -185,6 +185,37 @@ async function extract(wrapper: ReturnType<typeof mount>) {
   await flushPromises();
 }
 describe("real team Vue workflow", () => {
+  it("marks an old result after changing the brief or mode and sends exactly the new snapshot",async()=>{
+    const wrapper=await ready();await extract(wrapper);
+    expect(wrapper.find('.result-stale').exists()).toBe(false);
+    await wrapper.get('#studio-prompt').setValue('保持场景风格，生成类似的场景。');
+    await button(wrapper,'风格学习').trigger('click');
+    expect(wrapper.get('.result-stale').text()).toContain('尚未按新要求生成');
+    expect(wrapper.text()).toContain('未指定主体时，不自动复刻图内产品');
+    await button(wrapper,'按要求生成新版本').trigger('click');await flushPromises();
+    expect(f.call).toHaveBeenCalledWith('reference.rewrite',expect.objectContaining({expectedContext:expect.objectContaining({source:'保持场景风格，生成类似的场景。',intent:'style',keep:''})}));
+    expect(wrapper.find('.result-stale').exists()).toBe(false);
+    expect(f.data.versions).toHaveLength(2);wrapper.unmount();
+  });
+  it("makes active keep constraints visible and invalidates a polish when mode or keep changes",async()=>{
+    const original=f.call.getMockImplementation()!;
+    f.call.mockImplementation(async(action:string,body:any)=>action==='prompt.polish'
+      ?{originalPrompt:'保持场景风格',polishedPrompt:'借用参考图场景的光影、色彩与空间层次。',originalContext:body.expectedContext}:original(action,body));
+    const wrapper=await ready();
+    await wrapper.get('#studio-prompt').setValue('保持场景风格');
+    await wrapper.get('#studio-keep').setValue('旧产品和配件不能改变');
+    await button(wrapper,'AI 润色').trigger('click');await flushPromises();
+    expect(button(wrapper,'采用润色').attributes('disabled')).toBeUndefined();
+    await button(wrapper,'风格学习').trigger('click');
+    expect(button(wrapper,'采用润色').attributes('disabled')).toBeDefined();
+    expect(wrapper.get('.keep-notice').text()).toContain('只学场景风格');
+    await button(wrapper,'清除保留要求').trigger('click');
+    expect(wrapper.get('#studio-keep').element.value).toBe('');
+    expect(wrapper.get('#studio-prompt').element.value).toBe('保持场景风格');
+    expect(button(wrapper,'采用润色').attributes('disabled')).toBeDefined();
+    expect(f.call.mock.calls.filter(([action])=>action==='prompt.polish')).toHaveLength(1);
+    expect(f.data.versions).toHaveLength(0);wrapper.unmount();
+  });
   it("uses task-appropriate copy in the text workspace",async()=>{
     const wrapper=await ready();
     await button(wrapper,"文字提示词").trigger("click");await flushPromises();

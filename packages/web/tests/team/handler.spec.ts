@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createStudioHandler } from "../../../../supabase/functions/_shared/studio-handler";
 import type { StudioStore } from "../../../../supabase/functions/_shared/studio-handler";
-import { StudioError } from "../../../../supabase/functions/_shared/studio-contract";
+import { StudioError, workspaceContext } from "../../../../supabase/functions/_shared/studio-contract";
 import { generateStudioJson } from "../../../../supabase/functions/_shared/studio-gemini";
 const uid = "11111111-1111-4111-8111-111111111111",
   wid = "22222222-2222-4222-8222-222222222222",
@@ -50,7 +50,7 @@ const version = {
   sequence: 1,
   parent_id: null,
   bundle,
-  context: {},
+  context: workspaceContext(workspace),
   kind: "reference.extract",
   created_at: new Date().toISOString(),
 };
@@ -130,6 +130,25 @@ function harness(overrides: Partial<StudioStore> = {}) {
   return { store, fetcher, generate, handler, request };
 }
 describe("authenticated team AI chain", () => {
+  it.each(["source", "keep", "intent", "template_id"])("rejects a changed %s snapshot before quota admission or any paid model call", async (field) => {
+    const h=harness();
+    const response=await h.request({action:"reference.rewrite",workspaceId:wid,versionId:vid,requestId:rid,
+      expectedContext:{...workspaceContext(workspace),[field]:"changed in another tab"}});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({error:"STALE_WORKSPACE"});
+    expect(h.store.begin).not.toHaveBeenCalled();expect(h.generate).not.toHaveBeenCalled();
+  });
+  it("keeps the version parent but rebuilds a new style goal without inheriting old product fields",async()=>{
+    const changed={...workspace,source_text:"保持场景风格，生成类似的场景。",keep_text:"",change_text:"",intent:"style" as const};
+    const h=harness({workspace:vi.fn().mockResolvedValue(changed),version:vi.fn().mockResolvedValue({...version,
+      bundle:{...bundle,structured:{oldProductLock:"旧产品纹理、屏幕、标牌"}}})});
+    const response=await h.request({action:"reference.rewrite",workspaceId:wid,versionId:vid,requestId:rid,expectedContext:workspaceContext(changed)});
+    expect(response.status).toBe(200);
+    const input=h.generate.mock.calls[0][0];
+    expect(JSON.parse(input.text)).toMatchObject({original:changed.source_text,keep:"",intent:"style",current:null});
+    expect(input.text).not.toContain("旧产品纹理");
+    expect(h.store.save).toHaveBeenCalledWith(uid,changed,vid,expect.any(Object),"reference.rewrite",rid);
+  });
   it("polishes a short reference brief before images exist without saving a generated version", async () => {
     const h=harness({workspace:vi.fn().mockResolvedValue({...workspace,reference_path:null,source_text:"把图1产品放进图2场景"})});
     h.fetcher.mockReset().mockResolvedValueOnce(new Response("",{status:404})).mockResolvedValueOnce(Response.json({

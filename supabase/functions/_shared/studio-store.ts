@@ -156,8 +156,8 @@ export class SupabaseStudioStore implements StudioStore {
     check(error);
     return data;
   }
-  async polish(user: string, workspace: string, request: string, prompt: string, original: string) {
-    const result = { polishedPrompt: prompt, originalPrompt: original };
+  async polish(user: string, workspace: string, request: string, prompt: string, original: string, context?: Record<string, unknown>) {
+    const result = { polishedPrompt: prompt, originalPrompt: original, ...(context ? {originalContext: context} : {}) };
     const { data, error } = await this.db.from("ps_requests")
       .update({ status: "succeeded", finished_at: new Date().toISOString(), result })
       .eq("id", request).eq("owner_id", user).eq("workspace_id", workspace)

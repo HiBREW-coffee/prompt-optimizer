@@ -1998,6 +1998,11 @@ button.run-pending::after { content: ""; display: inline-block; vertical-align: 
 .generation-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; padding: 13px 15px; margin-top: 14px; background: #f5f5f0; border-radius: 13px; color: #44483b; font-size: 12px; font-variant-numeric: tabular-nums; }
 .generation-progress small { margin-left: auto; color: #77796d; }
 .progress-orbit { width: 13px; height: 13px; border: 2px solid #f0cbb7; border-top-color: #e56b3d; border-radius: 50%; animation: dongwu-spin .85s linear infinite; }
+.keep-heading { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:20px; }
+.keep-heading label { margin:0; }
+.keep-heading button { border:0; padding:4px 0; background:transparent; color:#8e6953; font-size:11px; }
+.keep-notice { margin:7px 0 0; color:#8b735f; font-size:11px; line-height:1.7; }
+.result-stale { margin:0 0 18px; padding:12px 15px; border:1px solid #f1d6c5; border-radius:13px; background:#fff6ee; color:#8b5738; font-size:12px; line-height:1.8; }
 .reference-delete { color: #a74d3f; }
 .upload-full { opacity: .5; cursor: default; }
 @keyframes dongwu-spin { to { transform: rotate(360deg); } }

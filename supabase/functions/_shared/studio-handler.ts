@@ -15,6 +15,7 @@ import {
   record,
   requireId,
   stableJson,
+  samePromptInputs,
 } from "./studio-contract.ts";
 import type {
   AiAction,
@@ -42,7 +43,7 @@ export interface StudioStore {
     request?: { status: string; result?: unknown; error_code?: string };
   }>;
   image(path: string): Promise<Uint8Array>;
-  polish(user: string, workspace: string, request: string, prompt: string, original: string): Promise<unknown>;
+  polish(user: string, workspace: string, request: string, prompt: string, original: string, context?: Record<string, unknown>): Promise<unknown>;
   memory?(user: string, workspace: StudioWorkspace): Promise<MemoryRule[]>;
   suggestion(
     user: string,
@@ -192,6 +193,11 @@ export function createStudioHandler(deps: HandlerDependencies) {
         ...workspaceContext(workspace),
         ...(memory.length ? { confirmed_preferences: memory } : {}),
       };
+      // The workspace may have changed in another tab between saving and running.
+      // Reject before admission rather than paying to optimize someone else's snapshot.
+      if (body.expectedContext !== undefined &&
+        (!record(body.expectedContext) || !samePromptInputs(body.expectedContext, context)))
+        throw new StudioError("STALE_WORKSPACE", 409);
       let suggestion = "";
       if (body.analysisId) {
         if (!version) throw new StudioError("VERSION_REQUIRED");
@@ -257,8 +263,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
         workspace,
         version,
         suggestion,
-        Boolean(body.inspectionId) || Boolean(version && Array.isArray(version.context.reference_images) &&
-          stableJson(version.context.reference_images) !== stableJson(references)),
+        Boolean(body.inspectionId),
         memory,
       );
       if (workspace.mode === "reference") {
@@ -295,7 +300,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
       if (action === "prompt.polish") {
         if (typeof parsed.prompt !== "string" || !parsed.prompt.trim() || parsed.prompt.length > 32000)
           throw new StudioError("INVALID_MODEL_OUTPUT", 502);
-        return new Response(JSON.stringify(await store.polish(user.id, workspace.id, id, parsed.prompt.trim(), workspace.source_text)), { headers });
+        return new Response(JSON.stringify(await store.polish(user.id, workspace.id, id, parsed.prompt.trim(), workspace.source_text, context)), { headers });
       }
       const isAnalysis =
         action === "prompt.evaluate" || action === "prompt.inspect";
@@ -329,7 +334,7 @@ export function createStudioHandler(deps: HandlerDependencies) {
         bundle &&
         version &&
         !body.inspectionId &&
-        !(Array.isArray(version.context.reference_images) && stableJson(version.context.reference_images) !== stableJson(references)) &&
+        samePromptInputs(version.context, context) &&
         (action === "reference.rewrite" || suggestion)
       ) {
         if (

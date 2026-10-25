@@ -73,6 +73,7 @@ const errors: Record<string, string> = {
   REQUEST_INTERRUPTED: "上次请求未完成，请手动重试。",
   REQUEST_CONFLICT: "这次请求的内容已变化，请重新发起。",
   STALE_ANALYSIS: "需求或版本已变化，请重新分析后再应用建议。",
+  STALE_WORKSPACE: "另一页面修改了本次需求，已停止调用模型。请核对当前提示词、保留项和图片后重新操作。",
   INVALID_MODEL_OUTPUT: "模型未返回完整的中英及结构化结果，请重试。",
   MODEL_DETAIL_LOSS:
     "这次改写遗漏了原版本的结构字段，未保存新版本。请缩小修改范围后手动重试。",
