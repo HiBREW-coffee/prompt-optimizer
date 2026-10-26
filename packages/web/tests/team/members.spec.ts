@@ -63,7 +63,7 @@ describe("administrator-managed member passwords", () => {
     for(const action of ["member.create","member.invite"])await expect(h.command(action,{email:"design01@accounts.dongwu.invalid",password})).rejects.toThrow("INVALID_EMAIL");
     expect(h.auth.createUser).not.toHaveBeenCalled();expect(h.auth.generateLink).not.toHaveBeenCalled();
   });
-  it.each(["member.create", "member.password"])(
+  it.each(["member.create", "member.password", "member.invite", "member.update", "settings.update"])(
     "rejects non-admin %s before touching Auth",
     async (action) => {
       const h = harness();

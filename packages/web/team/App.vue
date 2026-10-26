@@ -68,6 +68,7 @@ async function resolvePicwishFiles(references: ReferenceImage[]) {
   return files;
 }
 const memoryOpen = ref(false);
+const aboutOpen = ref(false);
 const memoryState = ref<StudioMemory>({ enabled: false, rules: [] });
 const feedback = useRunFeedback();
 const runningAction = ref("");
@@ -150,6 +151,9 @@ const mode = computed<StudioMode>(() =>
 const isEditor = computed(
   () => page.value === "reference" || page.value === "text",
 );
+const isAdmin = computed(() => !!user.value && member.value?.user_id === user.value.id && member.value.active && member.value.role === "admin");
+let identityRevision = 0, memberRequest = 0, disposed = false;
+let recoveryOwner: string | undefined;
 const activeMemory = computed(() => applicableMemory(memoryState.value, mode.value, templateId.value));
 async function saveMemory(memory: StudioMemory) {
   await attempt(async () => {
@@ -303,14 +307,18 @@ async function logout() {
   });
 }
 async function loadMember() {
-  if (!user.value || !db) return;
+  const owner = user.value?.id;
+  if (!owner || !db) return;
+  const revision = identityRevision, request = ++memberRequest;
+  const current = () => !disposed && user.value?.id === owner && identityRevision === revision && memberRequest === request;
   loading.value = true;
   error.value = "";
   try {
     const found = await rows<Member>("ps_members", (q) =>
-      q.eq("user_id", user.value!.id),
+      q.eq("user_id", owner),
     );
-    member.value = found[0] ?? null;
+    if (!current()) return;
+    member.value = found.find((entry) => entry.user_id === owner) ?? null;
     if (!member.value?.active) return;
     const status = await call<{
       configured: boolean;
@@ -318,22 +326,26 @@ async function loadMember() {
       used: number;
       dailyLimit: number;
     }>("status");
+    if (!current()) return;
     settings.value = status.settings;
     used.value = status.used;
     dailyLimit.value = status.dailyLimit;
     configured.value = status.configured;
     const savedMemory = await call<StudioMemory>("memory.get");
+    if (!current()) return;
     memoryState.value = { enabled: savedMemory.enabled === true, rules: savedMemory.rules ?? [] };
-    pendingId.value = localStorage.getItem(`ps-pending-${user.value.id}`) || "";
+    pendingId.value = localStorage.getItem(`ps-pending-${owner}`) || "";
     await loadLists();
   } catch (e) {
-    explain(e);
+    if (current()) explain(e);
   } finally {
-    loading.value = false;
+    if (current()) loading.value = false;
   }
 }
 async function loadLists() {
-  const owner = user.value?.id;
+  const owner = user.value?.id, revision = identityRevision;
+  const current = () => !disposed && user.value?.id === owner && identityRevision === revision;
+  if (!owner || !member.value?.active || member.value.user_id !== owner) return;
   const [w, l, f] = await Promise.all([
     rows<StudioWorkspace>("ps_workspaces", (q) =>
       q.order("updated_at", { ascending: false }),
@@ -343,14 +355,16 @@ async function loadLists() {
     ),
     rows<{ library_id: string }>("ps_library_favorites"),
   ]);
-  if (user.value?.id !== owner) return;
+  if (!current()) return;
   workspaces.value = w;
   library.value = l;
   favoriteIds.value = f.map((x) => x.library_id);
-  if (member.value?.role === "admin")
-    members.value = await rows<Member>("ps_members", (q) =>
+  if (isAdmin.value) {
+    const found = await rows<Member>("ps_members", (q) =>
       q.order("created_at"),
     );
+    if (current() && isAdmin.value) members.value = found;
+  } else members.value = [];
 }
 function resetEditor() {
   polishPreview.value = null;
@@ -374,6 +388,7 @@ function resetEditor() {
   outputTab.value = "report";
 }
 function navigate(target: Page) {
+  if (target === "admin" && !isAdmin.value) return;
   if (busy.value || !mayLeaveEditor()) return;
   if (target !== "admin") {
     newMemberPassword.value = "";
@@ -528,9 +543,11 @@ async function loadInspection() {
   if (workspace.value?.id === id) inspection.value = found[0] ?? null;
 }
 async function refreshUsage() {
-  if (member.value?.role !== "admin") return;
+  if (!isAdmin.value) return;
+  const authorization = member.value;
   try {
     const status = await call<{ used: number; dailyLimit: number }>("status");
+    if (member.value !== authorization || !isAdmin.value) return;
     used.value = status.used;
     dailyLimit.value = status.dailyLimit;
   } catch {}
@@ -976,17 +993,21 @@ async function unpublish(item: LibraryRow) {
   });
 }
 async function invite() {
+  if (!isAdmin.value) return;
+  const authorization = member.value;
   await attempt(async () => {
     inviteUrl.value = "";
     const result = await call<{ inviteUrl: string }>("member.invite", {
       email: inviteEmail.value,
     });
+    if (member.value !== authorization || !isAdmin.value) return;
     inviteUrl.value = result.inviteUrl;
     await loadLists();
   });
 }
 async function createMember() {
-  if (busy.value) return;
+  if (busy.value || !isAdmin.value) return;
+  const authorization = member.value;
   const initialPassword = newMemberPassword.value;
   newMemberPassword.value = "";
   await attempt(async () => {
@@ -995,13 +1016,17 @@ async function createMember() {
       username,
       password: initialPassword,
     });
+    if (member.value !== authorization || !isAdmin.value) return;
     newMemberAccount.value = "";
     await loadLists();
+    if (member.value !== authorization || !isAdmin.value) return;
     notice.value =
       `成员已添加，账号：${username}。请私下告知账号和初始密码，成员可直接登录并自行修改密码。`;
   });
 }
 async function changeMemberPassword() {
+  if (!isAdmin.value) return;
+  const authorization = member.value;
   const target = passwordMember.value;
   if (!target) return;
   const nextPassword = resetMemberPassword.value;
@@ -1011,35 +1036,70 @@ async function changeMemberPassword() {
       userId: target.user_id,
       password: nextPassword,
     });
+    if (member.value !== authorization || !isAdmin.value) return;
     passwordMember.value = null;
     notice.value = "成员密码已重设。请私下告知对应成员。";
   });
 }
 async function copyInvite() {
+  if (!isAdmin.value) return;
   await attempt(async () => {
     await navigator.clipboard.writeText(inviteUrl.value);
     notice.value = "邀请链接已复制。";
   });
 }
 async function updateMember(m: Member) {
+  if (!isAdmin.value) return;
+  const authorization = member.value;
   await attempt(async () => {
     await call("member.update", {
       userId: m.user_id,
       active: !m.active,
       dailyLimit: m.daily_limit,
     });
+    if (member.value !== authorization || !isAdmin.value) return;
     await loadLists();
   });
 }
+async function saveSettings() {
+  if (!isAdmin.value) return;
+  const authorization = member.value;
+  await attempt(async () => {
+    await call("settings.update", { settings: settings.value });
+    if (member.value !== authorization || !isAdmin.value) return;
+    notice.value = "使用设置已保存。";
+    await refreshUsage();
+  });
+}
+watch([page, isAdmin], ([currentPage, allowed]) => {
+  if (currentPage === "admin" && !allowed) page.value = "reference";
+});
 watch(
   () => user.value?.id,
   () => {
+    identityRevision++;
+    memberRequest++;
+    page.value = "reference";
     resetEditor();
     workspaces.value = [];
     memoryState.value = { enabled: false, rules: [] };
     memoryOpen.value = false;
     library.value = [];
+    favoriteIds.value = [];
     members.value = [];
+    aboutOpen.value = false;
+    inspirationOpen.value = false;
+    publishOpen.value = false;
+    shareImage.value = false;
+    search.value = "";
+    inviteEmail.value = "";
+    email.value = "";
+    error.value = "";
+    notice.value = "";
+    settings.value = { member_daily: 0, team_daily: 0, user_concurrent: 1, team_concurrent: 2 };
+    used.value = 0;
+    dailyLimit.value = 0;
+    configured.value = true;
     inviteUrl.value = "";
     newMemberAccount.value = "";
     newMemberPassword.value = "";
@@ -1048,6 +1108,7 @@ watch(
     password.value = "";
     pendingId.value = "";
     member.value = null;
+    setPassword.value = !!user.value && recoveryOwner === user.value.id;
     if (user.value) void loadMember();
     else loading.value = false;
   },
@@ -1057,18 +1118,28 @@ onMounted(async () => {
     loading.value = false;
     return;
   }
+  let authEvents = 0;
   const { data } = db.auth.onAuthStateChange((event, session) => {
+    if (event === "PASSWORD_RECOVERY" || (!authEvents && needsPassword && session)) recoveryOwner = session?.user.id;
+    else if (session?.user.id !== user.value?.id) recoveryOwner = undefined;
+    authEvents++;
     user.value = session?.user ?? null;
     if (event === "PASSWORD_RECOVERY") setPassword.value = true;
   });
   authSubscription = data.subscription;
+  const eventsBeforeSession = authEvents;
   const {
     data: { session },
   } = await db.auth.getSession();
+  if (disposed || authEvents !== eventsBeforeSession) return;
+  if (session && needsPassword) recoveryOwner = session.user.id;
   user.value = session?.user ?? null;
+  if (session && needsPassword) setPassword.value = true;
   if (!session) loading.value = false;
 });
 onBeforeUnmount(() => {
+  disposed = true;
+  memberRequest++;
   newMemberPassword.value = "";
   resetMemberPassword.value = "";
   password.value = "";
@@ -1132,7 +1203,7 @@ onBeforeUnmount(() => {
   <div v-else-if="loading" class="gate" role="status">
     正在打开你的私人工作空间…
   </div>
-  <div v-else-if="!member?.active" class="gate" @click.capture="feedback.capture">
+  <div v-else-if="!member?.active || member.user_id !== user.id" class="gate" @click.capture="feedback.capture">
     <div class="gate-card">
       <h1>等待团队邀请</h1>
       <p>{{ error || "此账号尚未加入工作室，请联系管理员邀请。" }}</p>
@@ -1178,7 +1249,7 @@ onBeforeUnmount(() => {
         ><button :disabled="busy" @click="memoryOpen = true">
           <StudioIcon name="spark" />创作经验</button
         ><button
-          v-if="member.role === 'admin'"
+          v-if="isAdmin"
           :class="{ active: page === 'admin' }"
           @click="navigate('admin')"
         >
@@ -1187,7 +1258,7 @@ onBeforeUnmount(() => {
       </nav>
       <div class="sidebar-bottom">
         <p>私人保存 · 按需分享</p>
-        <template v-if="member?.role === 'admin'">
+        <template v-if="isAdmin">
           <small>今日请求 {{ used }} 次{{ dailyLimit > 0 ? ` / ${dailyLimit}` : ' · 每日不限' }}</small>
           <progress v-if="dailyLimit > 0" :value="used" :max="dailyLimit"></progress>
         </template>
@@ -1228,6 +1299,7 @@ onBeforeUnmount(() => {
             ><b>@DONGWU</b><small>{{ accountLabel(member.email) }}</small></span
           ><button class="quiet" :disabled="busy" @click="setPassword = true">
             修改密码</button
+          ><button class="quiet" @click="aboutOpen = true">关于</button
           ><button class="quiet" @click="logout">退出</button>
         </div>
         <details class="compact-account">
@@ -1240,6 +1312,7 @@ onBeforeUnmount(() => {
               修改密码
             </button>
             <button :disabled="busy" @click="logout">退出</button>
+            <button @click="aboutOpen = true">关于</button>
           </section>
         </details>
       </header>
@@ -1840,7 +1913,7 @@ onBeforeUnmount(() => {
             </p></template
           >
         </template>
-        <template v-else-if="page === 'admin'"
+        <template v-else-if="page === 'admin' && isAdmin"
           ><div class="page-title">
             <div>
               <span class="eyebrow">TEAM SETTINGS</span>
@@ -1902,13 +1975,7 @@ onBeforeUnmount(() => {
             </section>
             <form
               class="panel"
-              @submit.prevent="
-                attempt(async () => {
-                  await call('settings.update', { settings });
-                  notice = '使用设置已保存。';
-                  await refreshUsage();
-                })
-              "
+              @submit.prevent="saveSettings"
             >
               <h2>请求统计与可选上限</h2>
               <label
@@ -1975,11 +2042,18 @@ onBeforeUnmount(() => {
         >
       </div>
       <footer>
-        @DONGWU 创作工作室 · 团队提示词资产 ·
-        <a :href="SOURCE_URL" target="_blank" rel="noopener">查看源码</a>
+        @DONGWU 创作工作室 · 团队提示词资产
       </footer>
     </main>
     <PicwishLauncher v-if="isEditor" :busy="busy" :result-prompt="selected && !resultStale ? draftZh : ''" :source-prompt="source" :keep-text="keep" :images="images" :resolve-files="resolvePicwishFiles"/>
+    <div v-if="aboutOpen" class="modal-backdrop" @click.self="aboutOpen = false">
+      <section class="modal" role="dialog" aria-modal="true" aria-labelledby="about-title">
+        <div class="panel-head"><h2 id="about-title">关于 @DONGWU</h2><button aria-label="关闭关于" @click="aboutOpen = false">×</button></div>
+        <p>团队创作工作室 · 参考图提炼与文字提示词优化</p>
+        <p class="hint">基于 Prompt Optimizer 构建，项目采用 AGPL-3.0-only 许可。</p>
+        <a :href="SOURCE_URL" target="_blank" rel="noopener">项目源码与许可</a>
+      </section>
+    </div>
     <div
       v-if="inspirationOpen"
       class="modal-backdrop"
