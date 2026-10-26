@@ -1207,6 +1207,28 @@ textarea {
 .member-row button {
   font-size: 10px;
 }
+.member-usage-heading, .member-usage-controls { display: flex; align-items: center; gap: 12px; }
+.member-usage-heading { justify-content: space-between; flex-wrap: wrap; margin-bottom: 12px; }
+.member-usage-heading h2 { margin: 0 0 8px; font-size: 16px; color: #616160; }
+.member-usage-heading .hint { margin: 0; }
+.member-usage-controls { flex-shrink: 0; }
+.member-usage-controls select { margin: 0; width: auto; min-width: 100px; padding: 8px 12px; font-size: 11px; }
+.member-usage-controls button { font-size: 11px; white-space: nowrap; }
+.member-usage { display: grid; grid-template-columns: minmax(180px, 1.6fr) repeat(3, minmax(70px, 1fr)); gap: 18px; flex: 2; }
+.member-usage > div { display: flex; flex-direction: column; gap: 5px; }
+.member-usage strong { font-size: 18px; color: #33332f; font-weight: 600; }
+.member-usage strong small { font-size: 10px; font-weight: 400; }
+.member-usage-summary { font-size: 11px; padding: 12px 14px; border-radius: 10px; background: #faf9f6; color: #74736f; }
+.member-usage-summary > small { margin-left: 12px; color: #a4a4a0; }
+.member-usage-empty { flex: 2; color: #aaa; }
+.member-usage-error { font-size: 11px; }
+@media (max-width: 1100px) {
+  .member-usage { order: 3; flex-basis: 100%; grid-template-columns: minmax(170px, 1.5fr) repeat(3, 1fr); padding-top: 10px; }
+}
+@media (max-width: 540px) {
+  .member-usage { grid-template-columns: 1.6fr 1fr; gap: 16px; }
+  .member-usage-summary > small { display: block; margin: 6px 0 0; }
+}
 .admin-grid h2,
 .panel > h2 {
   font-size: 16px;

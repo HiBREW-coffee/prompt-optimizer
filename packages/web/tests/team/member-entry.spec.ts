@@ -22,6 +22,11 @@ import App from "../../team/App.vue";
 const adminId = "11111111-1111-4111-8111-111111111111";
 const memberId = "33333333-3333-4333-8333-333333333333";
 const status = { configured: true, settings: { member_daily: 0, team_daily: 0, user_concurrent: 1, team_concurrent: 2 }, used: 0, dailyLimit: 0 };
+function report(period = 'today', count = 0) {
+  return { period, from: period === 'all' ? null : '2026-10-25T16:00:00Z', asOf: '2026-10-26T08:00:00Z', timeZone: 'Asia/Shanghai',
+    members: f.members.map((m) => ({ userId: m.user_id, requests: count+5, generations: count+2, generationSucceeded: count+1,
+      generationFailed: 1, generationRunning: 0, polish: 1, analysis: 2, lastRequestAt: '2026-10-26T07:00:00Z' })) };
+}
 function queryOwner(configure: any): string | undefined {
   const query = { eq: vi.fn().mockReturnThis(), order: vi.fn().mockReturnThis() };
   configure?.(query);
@@ -58,12 +63,55 @@ beforeEach(() => {
     const owner = queryOwner(configure);
     return owner ? f.members.filter((m) => m.user_id === owner) : f.members;
   });
-  f.call.mockImplementation(async (action: string) => action === "status" ? status : action === "memory.get" ? { enabled: false, rules: [] } : { ok: true });
+  f.call.mockImplementation(async (action: string, body: any) => action === "status" ? status : action === "memory.get" ? { enabled: false, rules: [] } : action === 'member.usage' ? report(body.period) : { ok: true });
   f.signOut.mockImplementation(async () => { identity(null); return { error: null }; });
 });
 afterEach(() => { wrappers.splice(0).forEach((w) => w.unmount()); });
 
 describe("member landing and account transitions", () => {
+  it('shows per-member generation outcomes, separate other operations and refreshable calendar periods only to admins', async () => {
+    const w = await ready();
+    expect(f.call.mock.calls.some(([action]) => action === 'member.usage')).toBe(false);
+    await button(w,'团队管理').trigger('click'); await flushPromises();
+    expect(f.call).toHaveBeenCalledWith('member.usage',{period:'today'});
+    const row = w.findAll('.member-row').find((r) => r.text().includes('design001'))!;
+    expect(row.text()).toContain('生成请求'); expect(row.text()).toContain('成功 1 · 失败 1 · 进行中 0');
+    expect(row.text()).toContain('AI 润色'); expect(row.text()).toContain('分析评估'); expect(row.text()).toContain('全部请求');
+    expect(w.get('.member-usage-summary').text()).toContain('生成 4 次 · 全部请求 10 次');
+    await w.get('[aria-label="成员统计时段"]').setValue('all'); await flushPromises();
+    expect(f.call).toHaveBeenLastCalledWith('member.usage',{period:'all'});
+    await button(w,'刷新统计').trigger('click'); await flushPromises();
+    expect(f.call.mock.calls.filter(([action]) => action === 'member.usage')).toHaveLength(3);
+    expect(f.call.mock.calls.every(([action]) => ['status','memory.get','member.usage'].includes(action))).toBe(true);
+    identity(memberId); await flushPromises(); expectMemberEditor(w);
+    expect(w.find('[aria-label="成员统计时段"]').exists()).toBe(false); expect(w.find('.member-usage').exists()).toBe(false);
+  });
+  it('reports failed statistics reads instead of fabricating zero and can recover with a manual refresh', async () => {
+    const original = f.call.getMockImplementation()!;
+    f.call.mockImplementation((action: string, body: any) => action === 'member.usage' ? Promise.reject(new Error('DATABASE_ERROR')) : original(action,body));
+    const w = await ready(); await button(w,'团队管理').trigger('click'); await flushPromises();
+    expect(w.text()).toContain('暂时无法读取成员统计'); expect(w.find('.member-usage-summary').exists()).toBe(false);
+    expect(w.findAll('.member-usage-empty')).toHaveLength(2); expect(w.find('.member-usage').exists()).toBe(false);
+    f.call.mockImplementation(original);
+    await button(w,'刷新统计').trigger('click'); await flushPromises();
+    expect(w.find('.member-usage-error').exists()).toBe(false); expect(w.findAll('.member-usage')).toHaveLength(2);
+  });
+  it('discards a slow report after another administrator signs in and shows only the current report', async () => {
+    f.members[1].role = 'admin';
+    const original = f.call.getMockImplementation()!;
+    const w = await ready(); await button(w,'团队管理').trigger('click'); await flushPromises();
+    let finish: (value: any) => void = () => {};
+    f.call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await button(w,'刷新统计').trigger('click');
+    expect(button(w,'刷新统计').attributes('aria-busy')).toBe('true');
+    identity(memberId); await flushPromises();
+    f.call.mockImplementation(original);
+    await button(w,'团队管理').trigger('click'); await flushPromises();
+    finish(report('today',999)); await flushPromises();
+    expect(w.get('.member-usage-summary').text()).toContain('生成 4 次 · 全部请求 10 次');
+    expect(w.get('.member-usage-summary').text()).not.toContain('999');
+    expect(button(w,'刷新统计').attributes('disabled')).toBeUndefined();
+  });
   it("opens reference extraction for a fresh member and keeps admin controls out of member navigation", async () => {
     f.getSession.mockResolvedValue({ data: { session: { user: { id: memberId } } } });
     const w = await ready(); expectMemberEditor(w);
@@ -82,6 +130,7 @@ describe("member landing and account transitions", () => {
     expect(w.find(".admin-grid").exists()).toBe(true);
     await w.get('input[autocomplete="off"]').setValue("unfinished-admin-account");
     await w.get('input[autocomplete="new-password"]').setValue("Synthetic-unsent-password");
+    f.call.mockClear();
     if (transition === "sign out first") {
       await button(w, "退出").trigger("click"); await flushPromises();
       expect(w.text()).toContain("登录工作室");

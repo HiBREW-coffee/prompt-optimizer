@@ -17,6 +17,7 @@ import type { StudioStore } from "./studio-handler.ts";
 import { applicableMemory, normalizeMemory } from "./studio-memory.ts";
 import type { StudioMemory } from "./studio-memory.ts";
 import { normalizeUsername, usernameEmail, isAccountEmail } from "./studio-account.ts";
+import { USAGE_PERIODS } from "./studio-usage.ts";
 
 const BUCKET = "prompt-studio-references";
 function check(error: { message?: string } | null): void {
@@ -28,10 +29,12 @@ function check(error: { message?: string } | null): void {
     "NOT_FOUND",
     "REQUEST_INTERRUPTED",
     "NOT_MEMBER",
+    "FORBIDDEN",
+    "INVALID_REQUEST",
   ].find((c) => error.message?.includes(c));
   throw new StudioError(
     code ?? "DATABASE_ERROR",
-    code === "NOT_FOUND" ? 404 : code === "NOT_MEMBER" ? 403 : code ? 409 : 500,
+    code === "NOT_FOUND" ? 404 : code === "NOT_MEMBER" || code === "FORBIDDEN" ? 403 : code === "INVALID_REQUEST" ? 400 : code ? 409 : 500,
   );
 }
 export class SupabaseStudioStore implements StudioStore {
@@ -462,6 +465,14 @@ export class SupabaseStudioStore implements StudioStore {
       };
     }
     if (!admin) throw new StudioError("FORBIDDEN", 403);
+    if (action === "member.usage") {
+      const period = body.period ?? "today";
+      if (!USAGE_PERIODS.includes(period as (typeof USAGE_PERIODS)[number]))
+        throw new StudioError("INVALID_REQUEST");
+      const { data, error } = await this.db.rpc("ps_member_usage", { p_admin: user, p_period: period });
+      check(error);
+      return data;
+    }
     if (action === "member.create") {
       if (body.username !== undefined && body.email !== undefined)
         throw new StudioError("INVALID_REQUEST");

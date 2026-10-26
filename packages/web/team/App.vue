@@ -29,6 +29,8 @@ import type {
 } from "../../../supabase/functions/_shared/studio-contract";
 import type { User } from "@supabase/supabase-js";
 import { accountLabel, accountLoginEmail, normalizeUsername, isAccountEmail, USERNAME_PATTERN } from "../../../supabase/functions/_shared/studio-account";
+import { isMemberUsageReport } from "../../../supabase/functions/_shared/studio-usage";
+import type { MemberUsageReport, UsagePeriod } from "../../../supabase/functions/_shared/studio-usage";
 import {
   db,
   call,
@@ -134,6 +136,16 @@ const settings = ref({
   used = ref(0),
   dailyLimit = ref(0),
   configured = ref(true);
+const usagePeriod = ref<UsagePeriod>("today"), memberUsage = ref<MemberUsageReport | null>(null),
+  usageLoading = ref(false), usageError = ref("");
+let usageRequest = 0;
+const usageByMember = computed(() => new Map(memberUsage.value?.period === usagePeriod.value
+  ? memberUsage.value.members.map((entry) => [entry.userId, entry]) : []));
+const usageTotals = computed(() => Array.from(usageByMember.value.values()).reduce((sum, entry) =>
+  ({ requests: sum.requests + entry.requests, generations: sum.generations + entry.generations }), { requests: 0, generations: 0 }));
+const usageUpdatedAt = computed(() => memberUsage.value ? new Intl.DateTimeFormat("zh-CN", {
+  timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+}).format(new Date(memberUsage.value.asOf)) : "");
 const search = ref(""),
   compareId = ref(""),
   publishOpen = ref(false),
@@ -363,8 +375,32 @@ async function loadLists() {
     const found = await rows<Member>("ps_members", (q) =>
       q.order("created_at"),
     );
-    if (current() && isAdmin.value) members.value = found;
+    if (current() && isAdmin.value) {
+      members.value = found;
+      if (page.value === "admin") await loadMemberUsage();
+    }
   } else members.value = [];
+}
+async function loadMemberUsage() {
+  if (!isAdmin.value || page.value !== "admin") return;
+  const authorization = member.value, revision = identityRevision, period = usagePeriod.value, request = ++usageRequest;
+  const current = () => !disposed && isAdmin.value && page.value === "admin" &&
+    member.value === authorization && identityRevision === revision && usagePeriod.value === period && usageRequest === request;
+  usageLoading.value = true;
+  usageError.value = "";
+  try {
+    const report = await call<MemberUsageReport>("member.usage", { period });
+    if (!current()) return;
+    if (!isMemberUsageReport(report) || report.period !== period) throw new Error("INVALID_USAGE_RESPONSE");
+    memberUsage.value = report;
+  } catch {
+    if (current()) {
+      memberUsage.value = null;
+      usageError.value = "暂时无法读取成员统计，请刷新重试。";
+    }
+  } finally {
+    if (current()) usageLoading.value = false;
+  }
 }
 function resetEditor() {
   polishPreview.value = null;
@@ -1073,6 +1109,12 @@ async function saveSettings() {
 }
 watch([page, isAdmin], ([currentPage, allowed]) => {
   if (currentPage === "admin" && !allowed) page.value = "reference";
+  if (currentPage !== "admin" || !allowed) {
+    usageRequest++;
+    memberUsage.value = null;
+    usageLoading.value = false;
+    usageError.value = "";
+  }
 });
 watch(
   () => user.value?.id,
@@ -1087,6 +1129,11 @@ watch(
     library.value = [];
     favoriteIds.value = [];
     members.value = [];
+    usageRequest++;
+    memberUsage.value = null;
+    usagePeriod.value = "today";
+    usageLoading.value = false;
+    usageError.value = "";
     aboutOpen.value = false;
     inspirationOpen.value = false;
     publishOpen.value = false;
@@ -1259,7 +1306,7 @@ onBeforeUnmount(() => {
       <div class="sidebar-bottom">
         <p>私人保存 · 按需分享</p>
         <template v-if="isAdmin">
-          <small>今日请求 {{ used }} 次{{ dailyLimit > 0 ? ` / ${dailyLimit}` : ' · 每日不限' }}</small>
+          <small>我的今日请求 {{ used }} 次{{ dailyLimit > 0 ? ` / ${dailyLimit}` : ' · 每日不限' }}</small>
           <progress v-if="dailyLimit > 0" :value="used" :max="dailyLimit"></progress>
         </template>
       </div>
@@ -2013,14 +2060,31 @@ onBeforeUnmount(() => {
             </form>
           </div>
           <section class="panel">
-            <h2>团队成员</h2>
+            <div class="member-usage-heading">
+              <div><h2>团队成员</h2><p class="hint">生成指本站提示词生成与改写，不含佐糖生图。统计按北京时间，包含已受理的失败请求；刷新统计不调用模型。</p></div>
+              <div class="member-usage-controls">
+                <select aria-label="成员统计时段" v-model="usagePeriod" :disabled="busy || usageLoading" @change="loadMemberUsage">
+                  <option value="today">今日</option><option value="7d">近 7 天</option><option value="30d">近 30 天</option><option value="all">累计</option>
+                </select>
+                <button type="button" class="quiet" :class="{ 'run-pending': usageLoading }" :aria-busy="usageLoading" :disabled="busy || usageLoading" @click="loadMemberUsage">刷新统计</button>
+              </div>
+            </div>
+            <p v-if="usageError" role="alert" class="error member-usage-error">{{ usageError }}</p>
+            <p v-if="memberUsage && memberUsage.period === usagePeriod" class="member-usage-summary">团队合计（含管理员）：生成 {{ usageTotals.generations }} 次 · 全部请求 {{ usageTotals.requests }} 次 <small>截至 {{ usageUpdatedAt }}</small></p>
             <div v-for="m in members" :key="m.user_id" class="member-row">
               <span
                 >{{ accountLabel(m.email) }}
                 <small>{{
                   m.role === "admin" ? "管理员" : m.active ? "使用中" : "已停用"
-                }}</small></span
-              ><button
+                }}</small></span>
+              <div class="member-usage" v-if="usageByMember.has(m.user_id)">
+                <div><small>生成请求</small><strong>{{ usageByMember.get(m.user_id)!.generations }} <small>次</small></strong><small>成功 {{ usageByMember.get(m.user_id)!.generationSucceeded }} · 失败 {{ usageByMember.get(m.user_id)!.generationFailed }} · 进行中 {{ usageByMember.get(m.user_id)!.generationRunning }}</small></div>
+                <div><small>AI 润色</small><strong>{{ usageByMember.get(m.user_id)!.polish }} <small>次</small></strong></div>
+                <div><small>分析评估</small><strong>{{ usageByMember.get(m.user_id)!.analysis }} <small>次</small></strong></div>
+                <div><small>全部请求</small><strong>{{ usageByMember.get(m.user_id)!.requests }} <small>次</small></strong></div>
+              </div>
+              <div v-else class="member-usage-empty" aria-label="成员统计待更新">—</div>
+              <button
                 v-if="m.role === 'member'"
                 :disabled="busy"
                 @click="updateMember(m)"

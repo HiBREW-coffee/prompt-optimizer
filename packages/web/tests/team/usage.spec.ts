@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import { SupabaseStudioStore } from "../../../../supabase/functions/_shared/studio-store";
+import { isMemberUsageReport } from "../../../../supabase/functions/_shared/studio-usage";
 
 function harness() {
   const settings = { member_daily: 0, team_daily: 0, user_concurrent: 1, team_concurrent: 2 };
@@ -21,6 +22,25 @@ function harness() {
   return { db, queries, settings, store };
 }
 describe("application usage controls", () => {
+  it("exposes only aggregate report data through an administrator-only service RPC", async () => {
+    const report = { period: 'today', from: '2026-10-25T16:00:00Z', asOf: '2026-10-26T08:00:00Z', timeZone: 'Asia/Shanghai', members: [] };
+    const db = { rpc: vi.fn().mockResolvedValue({ data: report, error: null }) };
+    const store = new SupabaseStudioStore(db as any,'https://studio.example',true);
+    await expect(store.command('member',false,'member.usage',{ period: 'today' })).rejects.toThrow('FORBIDDEN');
+    expect(db.rpc).not.toHaveBeenCalled();
+    expect(await store.command('admin',true,'member.usage',{})).toEqual(report);
+    expect(db.rpc).toHaveBeenCalledWith('ps_member_usage',{ p_admin: 'admin', p_period: 'today' });
+    await expect(store.command('admin',true,'member.usage',{ period: 'unbounded sql' })).rejects.toThrow('INVALID_REQUEST');
+    expect(db.rpc).toHaveBeenCalledTimes(1);
+  });
+  it("rejects malformed or inconsistent reports instead of presenting false zero counts", () => {
+    const member = { userId: 'test', requests: 5, generations: 3, generationSucceeded: 1, generationFailed: 1, generationRunning: 1, polish: 1, analysis: 1, lastRequestAt: null };
+    const report = { period: 'today', from: '2026-10-25T16:00:00Z', asOf: '2026-10-26T08:00:00Z', timeZone: 'Asia/Shanghai', members: [member] };
+    expect(isMemberUsageReport(report)).toBe(true);
+    for (const invalid of [null,{}, { ...report, members: [member,member] }, { ...report, asOf: 'bad' },
+      { ...report, members: [{...member,polish:-1}] }, { ...report, members: [{...member,generationRunning:0}] },
+      { ...report, members: [{...member,requests:4}] }]) expect(isMemberUsageReport(invalid)).toBe(false);
+  });
   it("returns member availability without fetching or exposing request statistics", async () => {
     const h = harness();
     const result = await h.store.command("member", false, "status", {});
@@ -50,4 +70,3 @@ describe("application usage controls", () => {
     expect(h.db.from).not.toHaveBeenCalled();
   });
 });
-

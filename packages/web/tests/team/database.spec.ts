@@ -100,7 +100,7 @@ beforeAll(async () => {
     "../../../../supabase/migrations/202610240003_usage_controls.sql", import.meta.url,
   )), "utf8"));
   usageDefaults = (await db.query("select * from ps_settings")).rows[0];
-  for (const file of ["202610240004_compact_memory.sql","202610240005_transient_references.sql"])
+  for (const file of ["202610240004_compact_memory.sql","202610240005_transient_references.sql","202610260006_member_usage.sql"])
     await db.exec(await readFile(fileURLToPath(new URL("../../../../supabase/migrations/"+file, import.meta.url)), "utf8"));
 }, 30_000);
 afterAll(async () => {
@@ -117,6 +117,64 @@ beforeEach(async () => {
  `);
 });
 describe("real PostgreSQL migration and policies", () => {
+  async function usage(period = "today", admin = a) {
+    return (await db.query<{ report: any }>("select public.ps_member_usage($1,$2) report", [admin, period])).rows[0].report;
+  }
+  it("counts each member's generations, statuses, polishing and analysis without returning private content", async () => {
+    await db.exec(`update ps_members set role='admin' where user_id='${a}';
+      insert into ps_requests(id,owner_id,workspace_id,action,payload_hash,status,result,created_at,expires_at)
+      select gen_random_uuid(),'${a}','${w}',x.action,'private-payload',x.status,'{"privatePrompt":"PRIVATE_PROMPT_TEXT"}',now()-interval '1 second',x.expires
+      from (values
+        ('reference.extract','succeeded',now()),('text.optimize','succeeded',now()),('reference.rewrite','succeeded',now()),
+        ('reference.extract','failed',now()),('reference.rewrite','running',now()+interval '120 seconds'),
+        ('reference.extract','running',now()-interval '1 second'),('prompt.polish','succeeded',now()),('prompt.polish','failed',now()),
+        ('prompt.inspect','succeeded',now()),('prompt.evaluate','succeeded',now())
+      ) x(action,status,expires);
+      insert into ps_requests(id,owner_id,workspace_id,action,payload_hash,status,created_at)
+      values(gen_random_uuid(),'${a}','${w}','reference.extract','future','succeeded',now()+interval '1 day');`);
+    const report = await usage();
+    expect(report).toMatchObject({ period: 'today', timeZone: 'Asia/Shanghai' });
+    expect(report.members.find((m: any) => m.userId === a)).toMatchObject({ requests: 10, generations: 6, generationSucceeded: 3, generationFailed: 2, generationRunning: 1, polish: 2, analysis: 2 });
+    expect(report.members.find((m: any) => m.userId === b)).toMatchObject({ requests: 0, generations: 0, polish: 0, analysis: 0, lastRequestAt: null });
+    expect(JSON.stringify(report)).not.toMatch(/PRIVATE_PROMPT_TEXT|private-payload|workspace_id|result|email/);
+    expect((await db.query<{ status: string }>("select status from ps_requests where status='running'")).rows).toHaveLength(2); // Reporting never mutates old requests.
+  });
+  it("uses Beijing calendar periods regardless of the database display timezone and preserves inactive-member history", async () => {
+    await db.exec(`set time zone 'Pacific/Honolulu';update ps_members set role='admin' where user_id='${a}';update ps_members set active=false where user_id='${b}';`);
+    const first = await usage(), start = first.from;
+    for (const [offset, owner, workspace] of [[0,a,w],[-1,a,w],[-7,a,w],[-30,a,w],[0,b,wb]] as const) {
+      await db.query("insert into ps_requests(id,owner_id,workspace_id,action,payload_hash,status,created_at) values(gen_random_uuid(),$1,$2,'reference.extract','test','succeeded',$3::timestamptz+$4::int*interval '1 day')",[owner,workspace,start,offset]);
+    }
+    const today = await usage(), week = await usage('7d'), month = await usage('30d'), all = await usage('all');
+    expect(new Date(today.from).getUTCHours()).toBe(16);
+    expect(new Date(today.from).getUTCMinutes()).toBe(0);
+    expect(Date.parse(today.from)-Date.parse(week.from)).toBe(6*86400000);
+    expect(Date.parse(today.from)-Date.parse(month.from)).toBe(29*86400000);
+    expect([today,week,month,all].map((r) => r.members.find((m: any) => m.userId===a).generations)).toEqual([1,2,3,4]);
+    expect(all.from).toBeNull(); expect(today.members.find((m: any) => m.userId===b).generations).toBe(1);
+    await db.exec("set time zone 'UTC'");
+  });
+  it("does not duplicate a recovered request and excludes non-model actions from totals", async () => {
+    await db.exec(`update ps_members set role='admin' where user_id='${a}';`);
+    await begin(); await db.exec("update ps_requests set status='succeeded'");
+    expect((await begin()).accepted).toBe(false);
+    await db.exec(`insert into ps_requests(id,owner_id,workspace_id,action,payload_hash,status) values(gen_random_uuid(),'${a}','${w}','version.save','manual','succeeded')`);
+    expect((await usage()).members.find((m: any) => m.userId===a)).toMatchObject({ requests: 1, generations: 1, generationSucceeded: 1 });
+  });
+  it("restricts statistics RPC execution to the service and rechecks administrator membership inside SQL", async () => {
+    await db.exec(`update ps_members set role='admin' where user_id='${a}';`);
+    for (const role of ['anon','authenticated']) {
+      await db.exec(`set role ${role}`);
+      await expect(usage()).rejects.toThrow('permission denied'); await db.exec('reset role');
+    }
+    await db.exec('set role service_role');
+    await expect(usage('today', b)).rejects.toThrow('FORBIDDEN');
+    await expect(usage('today', outsider)).rejects.toThrow('FORBIDDEN');
+    expect((await usage()).members).toHaveLength(2);
+    await expect(usage('invalid')).rejects.toThrow('INVALID_REQUEST');
+    await db.exec(`reset role;update ps_members set active=false where user_id='${a}';set role service_role;`);
+    await expect(usage()).rejects.toThrow('FORBIDDEN'); await db.exec('reset role');
+  });
   it("isolates compact text memory and prevents browser writes", async () => {
     await db.exec(`insert into ps_memory(owner_id,enabled,rules) values('${a}',true,'[{"rule":"private A"}]'),('${b}',true,'[{"rule":"private B"}]')`);
     await asUser(a);
@@ -517,4 +575,3 @@ describe("real PostgreSQL migration and policies", () => {
     expect((await db.query("select * from ps_versions")).rows).toHaveLength(2);
   });
 });
-
