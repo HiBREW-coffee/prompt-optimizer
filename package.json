@@ -4,7 +4,7 @@
   "private": true,
   "packageManager": "pnpm@10.6.1",
   "engines": {
-    "node": "^24.0.0",
+    "node": "^24.15.0",
     "npm": "Please use pnpm instead of npm",
     "yarn": "Please use pnpm instead of yarn"
   },
@@ -72,7 +72,11 @@
     "typecheck:web": "pnpm -F @prompt-optimizer/web typecheck",
     "typecheck:extension": "pnpm -F @prompt-optimizer/extension typecheck",
     "typecheck:mcp-server": "pnpm -F @prompt-optimizer/mcp-server type-check",
-    "kill:dev": "node scripts/kill-dev.js"
+    "kill:dev": "node scripts/kill-dev.js",
+    "dev:team": "pnpm -F @prompt-optimizer/web dev:team",
+    "build:team": "pnpm -F @prompt-optimizer/web build:team",
+    "test:team": "pnpm -F @prompt-optimizer/web test:team",
+    "typecheck:team": "pnpm -F @prompt-optimizer/web typecheck:team"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

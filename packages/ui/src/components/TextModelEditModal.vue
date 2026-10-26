@@ -160,6 +160,21 @@
             </template>
           </NFormItem>
 
+          <NAlert
+            v-if="showGeminiBridgePreset"
+            type="info"
+            :show-icon="false"
+            style="margin: 4px 0 14px;"
+            data-testid="prompt-studio-gemini-bridge"
+          >
+            <NSpace align="center" justify="space-between">
+              <NText depth="2">{{ t('modelManager.lk888BridgeHint') }}</NText>
+              <NButton size="small" secondary type="primary" @click="applyGeminiBridgePreset">
+                {{ t('modelManager.lk888BridgeAction') }}
+              </NButton>
+            </NSpace>
+          </NAlert>
+
           <NFormItem v-if="showCustomHeaders" :label="t('modelManager.customHeaders.label')">
             <div class="custom-headers-editor">
               <div
@@ -379,6 +394,30 @@ const isPreparingChromeBuiltIn = manager.isPreparingChromeBuiltIn
 const chromeBuiltInDownloadProgress = manager.chromeBuiltInDownloadProgress
 const refreshChromeBuiltInStatus = manager.refreshChromeBuiltInStatus
 const prepareChromeBuiltInDownload = manager.prepareChromeBuiltInDownload
+
+// This preset is only offered when the fixed-origin Vite development bridge exists.
+// Do not show it on public deployments that lack the corresponding server route.
+const showGeminiBridgePreset = computed(() => {
+  if (form.value.providerId !== 'gemini' || typeof window === 'undefined') return false
+  const { hostname, port } = window.location
+  return (port === '18181' && (hostname === 'localhost' || hostname === '127.0.0.1'))
+    || /^[-a-z0-9]+-18181\.app\.github\.dev$/i.test(hostname)
+})
+
+const applyGeminiBridgePreset = () => {
+  if (!showGeminiBridgePreset.value) return
+  const modelId = 'gem-3.8-flash'
+  form.value.connectionConfig.baseURL = `${window.location.origin}/api/ps-gemini`
+  if (!modelOptions.value.some(option => option.value === modelId)) {
+    modelOptions.value.push({ value: modelId, label: modelId })
+  }
+  form.value.modelId = modelId
+  form.value.defaultModel = modelId
+  form.value.enabled = true
+  form.value.name = 'LK888 GEM 3.8 Flash'
+  onModelChange(modelId)
+  formConnectionStatus.value = null
+}
 
 const isEditing = computed(() => !!manager.editingModelId.value)
 

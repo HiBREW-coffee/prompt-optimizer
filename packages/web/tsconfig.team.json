@@ -1,0 +1,5 @@
+{
+  "extends": "./tsconfig.typecheck.json",
+  "compilerOptions": { "noUnusedLocals": true, "noUnusedParameters": true },
+  "include": ["team/**/*.ts", "team/**/*.vue", "../../supabase/functions/_shared/studio-contract.ts"]
+}

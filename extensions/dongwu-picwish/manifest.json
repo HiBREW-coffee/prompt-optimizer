@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "DONGWU · 佐糖生图助手",
+  "version": "0.1.0",
+  "minimum_chrome_version": "120",
+  "description": "将 DONGWU 的提示词和最多五张原图送到佐糖独立创作窗；保留模型、比例、分辨率与原站下载。",
+  "permissions": ["storage"],
+  "background": {"service_worker":"background.js","type":"module"},
+  "action": {"default_title":"打开佐糖创作窗"},
+  "content_scripts": [
+    {"matches":["https://hibrew-prompt-studio.pages.dev/*"],"js":["dongwu.js"],"run_at":"document_idle"},
+    {"matches":["https://picwish.cn/ai-design-create*"],"js":["adapter.js","picwish.js"],"css":["skin.css"],"run_at":"document_idle"}
+  ],
+  "icons":{"128":"icon.png"}
+}

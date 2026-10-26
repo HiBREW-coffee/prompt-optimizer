@@ -184,6 +184,11 @@
                     >
                         {{ t("prompt.saveChanges") }}
                     </NButton>
+                    <PromptConstraintReview
+                        v-if="optimizedPrompt && originalPrompt"
+                        :original-prompt="originalPrompt"
+                        :optimized-prompt="optimizedPrompt"
+                    />
                     <!-- 继续优化按钮 -->
                     <NButton
                         v-if="optimizedPrompt"
@@ -320,6 +325,7 @@ import { useToast } from '../composables/ui/useToast';
 import { useEvaluationContextOptional } from '../composables/prompt/useEvaluationContext';
 import { useProContextOptional } from '../composables/prompt/useProContext';
 import TemplateSelect from "./TemplateSelect.vue";
+import PromptConstraintReview from "./PromptConstraintReview.vue";
 import Modal from "./Modal.vue";
 import OutputDisplay from "./OutputDisplay.vue";
 import ThemedTooltip from './common/ThemedTooltip.vue';

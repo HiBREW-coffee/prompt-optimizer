@@ -31,6 +31,8 @@ const messages = {
     "imageModels": "圖像模型",
     "functionModels": "功能模型",
     "modelList": "模型清單",
+    "lk888BridgeHint": "LK888 Gemini 相容服務：開發環境可使用同源代理，避免瀏覽器跨網域限制。API Key 保持不變。",
+    "lk888BridgeAction": "使用 LK888 相容代理",
     "testConnection": "測試連線",
     "editModel": "編輯",
     "deleteModel": "刪除",
