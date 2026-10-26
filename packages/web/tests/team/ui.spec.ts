@@ -8,6 +8,7 @@ const f = vi.hoisted(() => ({
   getSession: vi.fn(),
   recovery: vi.fn(),
   signIn: vi.fn(),
+  authEvent: undefined as undefined | ((event: string, session: any) => void),
   data: {
     workspaces: [] as any[],
     versions: [] as any[],
@@ -19,9 +20,9 @@ vi.mock("../../team/api", () => ({
   db: {
     auth: {
       getSession: f.getSession,
-      onAuthStateChange: () => ({
+      onAuthStateChange: (listener: (event: string, session: any) => void) => { f.authEvent = listener; return ({
         data: { subscription: { unsubscribe: vi.fn() } },
-      }),
+      }); },
       signOut: f.logout,
       signInWithPassword: f.signIn,
       resetPasswordForEmail: f.recovery,
@@ -39,6 +40,7 @@ vi.mock("../../team/api", () => ({
 }));
 import App from "../../team/App.vue";
 import ProfessionalReport from "../../team/ProfessionalReport.vue";
+import PicwishLauncher from "../../team/PicwishLauncher.vue";
 import { workspaceContext } from "../../../../supabase/functions/_shared/studio-contract";
 const uid = "11111111-1111-4111-8111-111111111111",
   wid = "22222222-2222-4222-8222-222222222222";
@@ -187,6 +189,104 @@ async function extract(wrapper: ReturnType<typeof mount>) {
   await flushPromises();
 }
 describe("real team Vue workflow", () => {
+  it("appends clipboard and dropped images in order, keeps source and roles, and preserves originals for the companion", async () => {
+    f.upload.mockImplementation(async (file: File) => ({ path: `${uid}/${file.name}`, preview: `blob:${file.name}`, data: "eA==", temporary: true }));
+    const wrapper = await ready();
+    const first = new File(["first"], "first.png", { type: "image/png" });
+    Object.defineProperty(wrapper.get('input[type=file]').element, "files", { value: [first], configurable: true });
+    await wrapper.get('input[type=file]').trigger('change'); await flushPromises();
+    await wrapper.get('#studio-prompt').setValue('图1的产品放入图2场景，借用图3光线');
+    await wrapper.get('.reference-card select').setValue('product');
+    const second = new File(["second"], "second.jpg", { type: "image/jpeg" });
+    const pasted = new Event('paste', { bubbles: true, cancelable: true });
+    Object.defineProperty(pasted, 'clipboardData', { value: { files: [second], types: ['Files'], items: [] } });
+    window.dispatchEvent(pasted); await flushPromises();
+    const third = new File(["third"], "third.png", { type: "image/png" });
+    await wrapper.get('.upload-control').trigger('drop', { dataTransfer: { files: [third], types: ['Files'], items: [] } }); await flushPromises();
+    expect(wrapper.findAll('.reference-photo img').map((img) => img.attributes('src'))).toEqual(['blob:first.png', 'blob:second.jpg', 'blob:third.png']);
+    expect(wrapper.get('.reference-card select').element.value).toBe('product');
+    expect(wrapper.get('#studio-prompt').element.value).toBe('图1的产品放入图2场景，借用图3光线');
+    const resolveFiles = wrapper.findComponent(PicwishLauncher).props('resolveFiles');
+    expect(await resolveFiles(['first.png', 'second.jpg', 'third.png'].map((name) => ({ path: `${uid}/${name}`, temporary: true })))).toEqual([first, second, third]);
+    expect(f.call.mock.calls.map(([action]) => action)).toEqual(['status', 'memory.get']);
+    wrapper.unmount();
+  });
+  it("leaves existing references intact when a later file in a dropped batch cannot be decoded", async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL');
+    const wrapper = await ready();
+    await wrapper.get('.upload-control').trigger('drop', { dataTransfer: { files: [new File(['x'], 'old.png', { type: 'image/png' })] } }); await flushPromises();
+    f.upload.mockResolvedValueOnce({ path: `${uid}/staged.png`, preview: 'blob:staged' }).mockRejectedValueOnce(new Error('INVALID_IMAGE'));
+    await wrapper.get('.upload-control').trigger('drop', { dataTransfer: { files: ['good.png', 'broken.png'].map((name) => new File(['x'], name, { type: 'image/png' })) } }); await flushPromises();
+    expect(wrapper.findAll('.reference-card')).toHaveLength(1);
+    expect(wrapper.get('.reference-photo img').attributes('src')).toBe('blob:preview');
+    expect(wrapper.text()).toContain('INVALID_IMAGE');
+    expect(revoke).toHaveBeenCalledWith('blob:staged');
+    expect(revoke).not.toHaveBeenCalledWith('blob:preview');
+    expect(f.call.mock.calls.map(([action]) => action)).toEqual(['status', 'memory.get']);
+    wrapper.unmount(); revoke.mockRestore();
+  });
+  it("validates entire pasted batches before image processing and enforces the shared five-image limit", async () => {
+    const wrapper = await ready();
+    const send = async (files: File[]) => { const e = new Event('paste', { cancelable: true }); Object.defineProperty(e, 'clipboardData', { value: { files } }); window.dispatchEvent(e); await flushPromises(); };
+    const png = () => new File(['x'], 'reference.png', { type: 'image/png' });
+    await send([png(), new File(['x'], 'bad.webp', { type: 'image/webp' })]);
+    expect(f.upload).not.toHaveBeenCalled(); expect(wrapper.text()).toContain('INVALID_IMAGE');
+    const big = png(); Object.defineProperty(big, 'size', { value: 10 * 1024 * 1024 + 1 });
+    await send([big]); expect(f.upload).not.toHaveBeenCalled();
+    await send(Array.from({ length: 6 }, png));
+    expect(f.upload).not.toHaveBeenCalled(); expect(wrapper.text()).toContain('INVALID_REFERENCE_IMAGES');
+    await send([png()]); expect(wrapper.findAll('.reference-card')).toHaveLength(1);
+    f.upload.mockClear();
+    await send(Array.from({ length: 5 }, png));
+    expect(f.upload).not.toHaveBeenCalled(); expect(wrapper.findAll('.reference-card')).toHaveLength(1);
+    wrapper.unmount();
+  });
+  it("cleans up a whole batch when processed data exceeds the aggregate limit", async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL'), wrapper = await ready();
+    f.upload.mockResolvedValueOnce({ path: `${uid}/large.png`, preview: 'blob:large', data: 'A'.repeat(10 * 1024 * 1024) })
+      .mockResolvedValueOnce({ path: `${uid}/middle.png`, preview: 'blob:middle', data: 'A'.repeat(10 * 1024 * 1024) })
+      .mockResolvedValueOnce({ path: `${uid}/overflow.png`, preview: 'blob:overflow', data: 'A'.repeat(10 * 1024 * 1024) });
+    await wrapper.get('.upload-control').trigger('drop', { dataTransfer: { files: ['a.png', 'b.png', 'c.png'].map((name) => new File(['x'], name, { type: 'image/png' })) } }); await flushPromises();
+    expect(wrapper.findAll('.reference-card')).toHaveLength(0); expect(wrapper.text()).toContain('IMAGES_TOO_LARGE');
+    expect(revoke).toHaveBeenCalledWith('blob:large'); expect(revoke).toHaveBeenCalledWith('blob:overflow');
+    expect(revoke).toHaveBeenCalledWith('blob:middle');
+    wrapper.unmount(); revoke.mockRestore();
+  });
+  it("reads clipboard only on request, blocks concurrent imports and recovers from permission denial", async () => {
+    const previous = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    let finish: (items: ClipboardItem[]) => void = () => {};
+    const read = vi.fn().mockImplementationOnce(() => new Promise<ClipboardItem[]>((resolve) => { finish = resolve; }))
+      .mockRejectedValueOnce(new DOMException('denied', 'NotAllowedError'));
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { read } });
+    const wrapper = await ready();
+    try {
+      expect(read).not.toHaveBeenCalled();
+      await button(wrapper, '粘贴图片').trigger('click');
+      expect(button(wrapper, '粘贴图片').attributes('aria-busy')).toBe('true');
+      expect(wrapper.text()).not.toContain('已用时');
+      await wrapper.get('.upload-control').trigger('drop', { dataTransfer: { files: [new File(['x'], 'ignored.png', { type: 'image/png' })] } });
+      expect(f.upload).not.toHaveBeenCalled();
+      finish([{ types: ['image/png'], getType: async () => new Blob(['image'], { type: 'image/png' }) } as unknown as ClipboardItem]); await flushPromises();
+      expect(wrapper.findAll('.reference-card')).toHaveLength(1);
+      await button(wrapper, '粘贴图片').trigger('click'); await flushPromises();
+      expect(wrapper.text()).toContain('CLIPBOARD_DENIED');
+      expect(button(wrapper, '粘贴图片').attributes('disabled')).toBeUndefined();
+      expect(button(wrapper, '粘贴图片').attributes('aria-busy')).toBeUndefined();
+      expect(f.upload).toHaveBeenCalledTimes(1);
+      expect(f.call.mock.calls.map(([action]) => action)).toEqual(['status', 'memory.get']);
+    } finally { wrapper.unmount(); if (previous) Object.defineProperty(navigator, 'clipboard', previous); else Reflect.deleteProperty(navigator, 'clipboard'); }
+  });
+  it("discards prepared images if authentication changes during processing", async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL'), wrapper = await ready();
+    let finish: (image: any) => void = () => {};
+    f.upload.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await wrapper.get('.upload-control').trigger('drop', { dataTransfer: { files: [new File(['x'], 'late.png', { type: 'image/png' })] } });
+    f.authEvent?.('SIGNED_OUT', null); await flushPromises();
+    finish({ path: `${uid}/late.png`, preview: 'blob:late' }); await flushPromises();
+    expect(revoke).toHaveBeenCalledWith('blob:late'); expect(wrapper.findAll('.reference-card')).toHaveLength(0);
+    expect(f.call.mock.calls.map(([action]) => action)).toEqual(['status', 'memory.get']);
+    wrapper.unmount(); revoke.mockRestore();
+  });
   it("marks an old result after changing the brief or mode and sends exactly the new snapshot",async()=>{
     const wrapper=await ready();await extract(wrapper);
     expect(wrapper.find('.result-stale').exists()).toBe(false);

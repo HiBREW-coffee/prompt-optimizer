@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import ReferenceBoard from "./ReferenceBoard.vue";
+import { readClipboardImages } from "./reference-input";
 import ProfessionalReportView from "./ProfessionalReport.vue";
 import AnalysisPanel from "./AnalysisPanel.vue";
 import StudioIcon from "./StudioIcon.vue";
@@ -431,10 +432,22 @@ function updateImage(index: number, key: "role" | "note", value: string) {
 }
 async function chooseImage(event: Event) {
   const input = event.target as HTMLInputElement;
-  const files = Array.from(input.files ?? []);
+  await addReferenceFiles(Array.from(input.files ?? []));
+  input.value = "";
+}
+async function addReferenceFiles(input: File[] | (() => Promise<File[]>)) {
+  const owner = user.value?.id, existing = images.value, workId = workspace.value?.id;
   await attempt(async () => {
+    function assertCurrent() {
+      if (!owner || user.value?.id !== owner || !member.value?.active ||
+        page.value !== "reference" || images.value !== existing || workspace.value?.id !== workId)
+        throw new Error("UPLOAD_CONTEXT_CHANGED");
+    }
+    assertCurrent();
+    const files = typeof input === "function" ? await input() : input;
+    assertCurrent();
     if (!files.length) return;
-    if (images.value.length + files.length > 5)
+    if (existing.length + files.length > 5)
       throw new Error("INVALID_REFERENCE_IMAGES");
     if (
       files.some(
@@ -444,20 +457,31 @@ async function chooseImage(event: Event) {
       )
     )
       throw new Error("INVALID_IMAGE");
-    for (const file of files) {
-      const result = await uploadImage(file, user.value!.id);
-      const bytes = (value: string) => Math.floor(value.length * 3 / 4) - (value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0);
-      if (bytes(result.data ?? "") + images.value.reduce((sum,image) => sum + bytes(image.data ?? ""),0) > 20 * 1024 * 1024) {
-        URL.revokeObjectURL(result.preview);
-        throw new Error("IMAGES_TOO_LARGE");
+    const prepared: Array<{ file: File; image: Awaited<ReturnType<typeof uploadImage>> }> = [];
+    const bytes = (value: string) => Math.floor(value.length * 3 / 4) - (value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0);
+    let total = existing.reduce((sum, image) => sum + bytes(image.data ?? ""), 0);
+    try {
+      for (const file of files) {
+        const image = await uploadImage(file, owner!);
+        prepared.push({ file, image });
+        assertCurrent();
+        total += bytes(image.data ?? "");
+        if (total > 20 * 1024 * 1024) throw new Error("IMAGES_TOO_LARGE");
       }
-      images.value.push({ ...result, role: "auto", note: "" });
-      originalFiles.set(result.path,file);
+      assertCurrent();
+    } catch (error) {
+      for (const { image } of prepared) URL.revokeObjectURL(image.preview);
+      throw error;
+    }
+    // Commit a whole batch together so retrying never duplicates a partial import.
+    for (const { file, image } of prepared) {
+      existing.push({ ...image, role: "auto", note: "" });
+      originalFiles.set(image.path, file);
     }
     notice.value = "参考图仅供本次页面使用，不存入工作室云端；刷新后需重新选择原图。图号按当前顺序对应。";
   });
-  input.value = "";
 }
+function pasteImages() { return addReferenceFiles(readClipboardImages); }
 async function restoreImage(index: number, event: Event) {
   const input = event.target as HTMLInputElement, file = input.files?.[0];
   if (!file) return;
@@ -1320,6 +1344,9 @@ onBeforeUnmount(() => {
                 :images="images"
                 :busy="busy"
                 @change="chooseImage"
+            @files="addReferenceFiles"
+            @paste="pasteImages"
+            @error="(code) => explain(new Error(code))"
                 @remove="removeImage"
                 @move="moveImage"
                 @update="updateImage"
